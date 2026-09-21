@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+
+    <Version>1.0.0</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+
+    <Company>Rainer Koch</Company>
+    <Product>Technitium DNS Server - FRITZ!Box Sync</Product>
+    <Authors>Rainer Koch</Authors>
+
+    <AssemblyName>FritzBoxSyncApp</AssemblyName>
+    <RootNamespace>FritzBoxSync</RootNamespace>
+    <Nullable>enable</Nullable>
+    <OutputType>Library</OutputType>
+  </PropertyGroup>
+
+<ItemGroup>
+  <ProjectReference Include="..\..\DnsServer\DnsServerCore.ApplicationCommon\DnsServerCore.ApplicationCommon.csproj">
+    <Private>false</Private>
+  </ProjectReference>
+
+  <ProjectReference Include="..\..\TechnitiumLibrary\TechnitiumLibrary.Net\TechnitiumLibrary.Net.csproj">
+    <Private>false</Private>
+  </ProjectReference>
+</ItemGroup>
+
+  <ItemGroup>
+    <None Update="dnsApp.config">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>
