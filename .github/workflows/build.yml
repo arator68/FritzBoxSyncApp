@@ -1,0 +1,97 @@
+name: Build FritzBoxSync
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  DOTNET_VERSION: "10.0.x"
+  DNS_SERVER_REF: "v15.5.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout FritzBoxSync
+        uses: actions/checkout@v7
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # The FritzBoxSync.csproj expects these repositories as siblings
+      # of the FritzBoxSyncApp repository.
+      - name: Checkout Technitium DNS Server
+        uses: actions/checkout@v7
+        with:
+          repository: TechnitiumSoftware/DnsServer
+          ref: ${{ env.DNS_SERVER_REF }}
+          path: ../DnsServer
+          fetch-depth: 1
+
+      - name: Checkout Technitium Library
+        uses: actions/checkout@v7
+        with:
+          repository: TechnitiumSoftware/TechnitiumLibrary
+          path: ../TechnitiumLibrary
+          fetch-depth: 1
+
+      - name: Show build layout
+        shell: bash
+        run: |
+          echo "Workspace: $GITHUB_WORKSPACE"
+          test -f "$GITHUB_WORKSPACE/src/FritzBoxSyncApp.csproj"
+          test -f "$GITHUB_WORKSPACE/../DnsServer/DnsServerCore.ApplicationCommon/DnsServerCore.ApplicationCommon.csproj"
+          test -f "$GITHUB_WORKSPACE/../TechnitiumLibrary/TechnitiumLibrary.Net/TechnitiumLibrary.Net.csproj"
+          echo "All ProjectReference targets found."
+
+      - name: Build Technitium Library dependencies
+        run: |
+          dotnet build ../TechnitiumLibrary/TechnitiumLibrary.ByteTree/TechnitiumLibrary.ByteTree.csproj -c Release
+          dotnet build ../TechnitiumLibrary/TechnitiumLibrary.Net/TechnitiumLibrary.Net.csproj -c Release
+          dotnet build ../TechnitiumLibrary/TechnitiumLibrary.Security.OTP/TechnitiumLibrary.Security.OTP.csproj -c Release
+
+      - name: Restore FritzBoxSync
+        run: dotnet restore ./src/FritzBoxSyncApp.csproj
+
+      - name: Build FritzBoxSync
+        run: dotnet build ./src/FritzBoxSyncApp.csproj -c Release --no-restore
+
+      - name: Prepare release package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RELEASE_DIR="$GITHUB_WORKSPACE/src/bin/Release"
+          PACKAGE_DIR="$GITHUB_WORKSPACE/package"
+
+          rm -rf "$PACKAGE_DIR"
+          mkdir -p "$PACKAGE_DIR"
+
+          test -f "$RELEASE_DIR/FritzBoxSyncApp.dll"
+          test -f "$RELEASE_DIR/FritzBoxSyncApp.deps.json"
+          test -f "$GITHUB_WORKSPACE/src/dnsApp.config.example"
+
+          cp "$RELEASE_DIR/FritzBoxSyncApp.dll" "$PACKAGE_DIR/"
+          cp "$RELEASE_DIR/FritzBoxSyncApp.deps.json" "$PACKAGE_DIR/"
+          cp "$GITHUB_WORKSPACE/src/dnsApp.config.example" "$PACKAGE_DIR/dnsApp.config"
+
+          cd "$PACKAGE_DIR"
+          zip -9 -r "$GITHUB_WORKSPACE/FritzBoxSyncApp-15.5.zip" .
+
+          echo "Package contents:"
+          unzip -l "$GITHUB_WORKSPACE/FritzBoxSyncApp-15.5.zip"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FritzBoxSyncApp-15.5
+          path: FritzBoxSyncApp-15.5.zip
+          if-no-files-found: error
