@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
   pull_request:
     branches:
       - main
@@ -54,9 +56,11 @@ jobs:
           # directory levels above src. Link the complete dependency
           # repositories there so all of their internal project references
           # remain available as well.
-          ln -sfn "$GITHUB_WORKSPACE/_deps/DnsServer"             "$GITHUB_WORKSPACE/../DnsServer"
+          ln -sfn "$GITHUB_WORKSPACE/_deps/DnsServer" \
+            "$GITHUB_WORKSPACE/../DnsServer"
 
-          ln -sfn "$GITHUB_WORKSPACE/_deps/TechnitiumLibrary"             "$GITHUB_WORKSPACE/../TechnitiumLibrary"
+          ln -sfn "$GITHUB_WORKSPACE/_deps/TechnitiumLibrary" \
+            "$GITHUB_WORKSPACE/../TechnitiumLibrary"
 
       - name: Show build layout
         shell: bash
@@ -64,9 +68,13 @@ jobs:
           set -euo pipefail
 
           echo "Workspace: $GITHUB_WORKSPACE"
+
           test -f "$GITHUB_WORKSPACE/src/FritzBoxSyncApp.csproj"
+
           test -f "$GITHUB_WORKSPACE/../DnsServer/DnsServerCore.ApplicationCommon/DnsServerCore.ApplicationCommon.csproj"
+
           test -f "$GITHUB_WORKSPACE/../TechnitiumLibrary/TechnitiumLibrary.Net/TechnitiumLibrary.Net.csproj"
+
           echo "All ProjectReference targets found."
 
       - name: Build Technitium Library dependencies
@@ -101,14 +109,27 @@ jobs:
           cp "$GITHUB_WORKSPACE/src/dnsApp.config.example" "$PACKAGE_DIR/dnsApp.config"
 
           cd "$PACKAGE_DIR"
+
           zip -9 -r "$GITHUB_WORKSPACE/FritzBoxSyncApp-15.5.zip" .
 
           echo "Package contents:"
           unzip -l "$GITHUB_WORKSPACE/FritzBoxSyncApp-15.5.zip"
 
+      # Always keep the ZIP as a workflow artifact.
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: FritzBoxSyncApp-15.5
           path: FritzBoxSyncApp-15.5.zip
           if-no-files-found: error
+
+      # Create a GitHub Release only when the workflow was triggered
+      # by a version tag such as v1.0.0.
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: FritzBoxSync ${{ github.ref_name }}
+          generate_release_notes: true
+          files: FritzBoxSyncApp-15.5.zip
