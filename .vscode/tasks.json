@@ -1,0 +1,71 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build TechnitiumLibrary.ByteTree",
+      "type": "shell",
+      "command": "dotnet",
+      "args": [
+        "build",
+        "${workspaceFolder}/../TechnitiumLibrary/TechnitiumLibrary.ByteTree/TechnitiumLibrary.ByteTree.csproj",
+        "-c",
+        "Release"
+      ],
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "Build TechnitiumLibrary.Net",
+      "type": "shell",
+      "command": "dotnet",
+      "args": [
+        "build",
+        "${workspaceFolder}/../TechnitiumLibrary/TechnitiumLibrary.Net/TechnitiumLibrary.Net.csproj",
+        "-c",
+        "Release"
+      ],
+      "dependsOn": [
+        "Build TechnitiumLibrary.ByteTree"
+      ],
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "Build TechnitiumLibrary.Security.OTP",
+      "type": "shell",
+      "command": "dotnet",
+      "args": [
+        "build",
+        "${workspaceFolder}/../TechnitiumLibrary/TechnitiumLibrary.Security.OTP/TechnitiumLibrary.Security.OTP.csproj",
+        "-c",
+        "Release"
+      ],
+      "dependsOn": [
+        "Build TechnitiumLibrary.Net"
+      ],
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "Build FritzBoxSyncApp",
+      "type": "shell",
+      "command": "dotnet",
+      "args": [
+        "build",
+        "${workspaceFolder}/src/FritzBoxSyncApp.csproj",
+        "-c",
+        "Release"
+      ],
+      "dependsOn": [
+        "Build TechnitiumLibrary.Security.OTP"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": "$msCompile"
+    }
+  ]
+}
