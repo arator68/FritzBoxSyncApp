@@ -26,26 +26,45 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      # The FritzBoxSync.csproj expects these repositories as siblings
-      # of the FritzBoxSyncApp repository.
+      # The FritzBoxSync.csproj uses ProjectReferences that point two
+      # directory levels above src. GitHub Actions does not allow
+      # actions/checkout to write outside GITHUB_WORKSPACE, so both
+      # repositories are checked out inside the workspace first.
       - name: Checkout Technitium DNS Server
         uses: actions/checkout@v7
         with:
           repository: TechnitiumSoftware/DnsServer
           ref: ${{ env.DNS_SERVER_REF }}
-          path: ../DnsServer
+          path: _deps/DnsServer
           fetch-depth: 1
 
       - name: Checkout Technitium Library
         uses: actions/checkout@v7
         with:
           repository: TechnitiumSoftware/TechnitiumLibrary
-          path: ../TechnitiumLibrary
+          path: _deps/TechnitiumLibrary
           fetch-depth: 1
+
+      - name: Prepare ProjectReference layout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # From src/, ../../ points to the parent of the repository.
+          # Create the expected directories there and link them back
+          # into the checked-out dependency repositories.
+          mkdir -p "$GITHUB_WORKSPACE/../DnsServer"
+          mkdir -p "$GITHUB_WORKSPACE/../TechnitiumLibrary"
+
+          ln -sfn "$GITHUB_WORKSPACE/_deps/DnsServer/DnsServerCore.ApplicationCommon"             "$GITHUB_WORKSPACE/../DnsServer/DnsServerCore.ApplicationCommon"
+
+          ln -sfn "$GITHUB_WORKSPACE/_deps/TechnitiumLibrary/TechnitiumLibrary.Net"             "$GITHUB_WORKSPACE/../TechnitiumLibrary/TechnitiumLibrary.Net"
 
       - name: Show build layout
         shell: bash
         run: |
+          set -euo pipefail
+
           echo "Workspace: $GITHUB_WORKSPACE"
           test -f "$GITHUB_WORKSPACE/src/FritzBoxSyncApp.csproj"
           test -f "$GITHUB_WORKSPACE/../DnsServer/DnsServerCore.ApplicationCommon/DnsServerCore.ApplicationCommon.csproj"
