@@ -120,7 +120,7 @@ A successful synchronization logs the number of reserved Technitium devices and 
 Open a terminal in the `src` directory:
 
 ```powershell
-cd "E:\Entwicklung\FritzBoxSyncApp-source-v2\FritzBoxSyncApp\src"
+cd "C:\Path\To\FritzBoxSyncApp\src"
 dotnet build .\FritzBoxSyncApp.csproj -c Release
 ```
 
