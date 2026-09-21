@@ -31,10 +31,6 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      # The FritzBoxSync.csproj uses ProjectReferences that point two
-      # directory levels above src. GitHub Actions does not allow
-      # actions/checkout to write outside GITHUB_WORKSPACE, so both
-      # repositories are checked out inside the workspace first.
       - name: Checkout Technitium DNS Server
         uses: actions/checkout@v7
         with:
@@ -55,10 +51,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # The ProjectReferences in FritzBoxSyncApp.csproj point two
-          # directory levels above src. Link the complete dependency
-          # repositories there so all of their internal project references
-          # remain available as well.
           ln -sfn "$GITHUB_WORKSPACE/_deps/DnsServer" \
             "$GITHUB_WORKSPACE/../DnsServer"
 
@@ -118,7 +110,6 @@ jobs:
           echo "Package contents:"
           unzip -l "$GITHUB_WORKSPACE/FritzBoxSyncApp-15.5.zip"
 
-      # Always keep the ZIP as a workflow artifact.
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -126,13 +117,11 @@ jobs:
           path: FritzBoxSyncApp-15.5.zip
           if-no-files-found: error
 
-      # Create a GitHub Release only when the workflow was triggered
-      # by a version tag such as v1.0.0.
       - name: Create GitHub Release
-      if: startsWith(github.ref, 'refs/tags/v')
-      uses: softprops/action-gh-release@v3
-      with:
-        tag_name: ${{ github.ref_name }}
-        name: FritzBoxSync ${{ github.ref_name }}
-        generate_release_notes: true
-        files: FritzBoxSyncApp-15.5.zip
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: FritzBoxSync ${{ github.ref_name }}
+          generate_release_notes: true
+          files: FritzBoxSyncApp-15.5.zip
