@@ -15,6 +15,9 @@ env:
   DOTNET_VERSION: "10.0.x"
   DNS_SERVER_REF: "v15.5.0"
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -126,10 +129,10 @@ jobs:
       # Create a GitHub Release only when the workflow was triggered
       # by a version tag such as v1.0.0.
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: FritzBoxSync ${{ github.ref_name }}
-          generate_release_notes: true
-          files: FritzBoxSyncApp-15.5.zip
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v3
+      with:
+        tag_name: ${{ github.ref_name }}
+        name: FritzBoxSync ${{ github.ref_name }}
+        generate_release_notes: true
+        files: FritzBoxSyncApp-15.5.zip
