@@ -50,15 +50,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          # From src/, ../../ points to the parent of the repository.
-          # Create the expected directories there and link them back
-          # into the checked-out dependency repositories.
-          mkdir -p "$GITHUB_WORKSPACE/../DnsServer"
-          mkdir -p "$GITHUB_WORKSPACE/../TechnitiumLibrary"
+          # The ProjectReferences in FritzBoxSyncApp.csproj point two
+          # directory levels above src. Link the complete dependency
+          # repositories there so all of their internal project references
+          # remain available as well.
+          ln -sfn "$GITHUB_WORKSPACE/_deps/DnsServer"             "$GITHUB_WORKSPACE/../DnsServer"
 
-          ln -sfn "$GITHUB_WORKSPACE/_deps/DnsServer/DnsServerCore.ApplicationCommon"             "$GITHUB_WORKSPACE/../DnsServer/DnsServerCore.ApplicationCommon"
-
-          ln -sfn "$GITHUB_WORKSPACE/_deps/TechnitiumLibrary/TechnitiumLibrary.Net"             "$GITHUB_WORKSPACE/../TechnitiumLibrary/TechnitiumLibrary.Net"
+          ln -sfn "$GITHUB_WORKSPACE/_deps/TechnitiumLibrary"             "$GITHUB_WORKSPACE/../TechnitiumLibrary"
 
       - name: Show build layout
         shell: bash
