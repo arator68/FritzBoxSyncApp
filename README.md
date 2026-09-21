@@ -120,7 +120,7 @@ A successful synchronization logs the number of reserved Technitium devices and 
 Open a terminal in the `src` directory:
 
 ```powershell
-cd "C:\Path\To\FritzBoxSyncApp\src"
+cd "E:\Entwicklung\FritzBoxSyncApp-source-v2\FritzBoxSyncApp\src"
 dotnet build .\FritzBoxSyncApp.csproj -c Release
 ```
 
@@ -165,4 +165,6 @@ Use a dedicated FRITZ!Box user for the synchronization application where possibl
 
 ## License
 
-Add your preferred license information here.
+FritzBoxSync is licensed under the MIT License.
+
+See the [LICENSE](LICENSE) file for the full license text.
