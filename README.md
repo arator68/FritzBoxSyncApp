@@ -109,32 +109,43 @@ Example:
   "enabled": true,
   "dryRun": false,
   "runOnStartup": true,
+  "enableIpv6Sync": true,
+  "ipv6Ttl": 3600,
   "intervalMinutes": 15,
 
   "fritzBoxUrl": "http://192.168.178.1:49000",
   "fritzBoxHttpsUrl": "https://192.168.178.1:49443",
+  "fritzBoxWebUrl": "http://192.168.178.1",
+
   "fritzUsername": "TechnitiumSync",
   "fritzPassword": "YOUR_PASSWORD",
 
   "technitiumApiUrl": "http://192.168.178.2:5380",
+  "technitiumDnsZone": "koch.local",
   "technitiumApiToken": "YOUR_API_TOKEN"
 }
 ```
 
 ### Configuration Options
 
+### Configuration Options
+
 | Option | Description |
-|---|---|
+| --- | --- |
 | `enabled` | Enables or disables the application. |
-| `dryRun` | If `true`, changes are only reported and are not written to the FRITZ!Box. |
+| `dryRun` | If `true`, changes are only reported and are not written to FRITZ!Box or Technitium DNS. |
 | `runOnStartup` | Runs a synchronization when the application starts. |
+| `enableIpv6Sync` | Enables or disables IPv6 synchronization. |
+| `ipv6Ttl` | TTL in seconds for synchronized IPv6 AAAA records. |
 | `intervalMinutes` | Interval between automatic synchronization runs. |
 | `fritzBoxUrl` | FRITZ!Box HTTP control URL. |
 | `fritzBoxHttpsUrl` | FRITZ!Box HTTPS URL used for the host list. |
+| `fritzBoxWebUrl` | FRITZ!Box web interface URL. |
 | `fritzUsername` | FRITZ!Box user name used for authentication. |
 | `fritzPassword` | FRITZ!Box password. |
 | `technitiumApiUrl` | Technitium DNS Server API URL. |
-| `technitiumApiToken` | Technitium API bearer token. |
+| `technitiumDnsZone` | DNS zone used for synchronized DNS records. |
+| `technitiumApiToken` | Technitium API token. |
 
 ## Dry-Run Mode
 
@@ -189,11 +200,46 @@ The synchronization summary reports information such as:
 - devices that could not be matched
 - errors encountered during synchronization
 
+The IPv6 synchronization summary reports information such as:
+
+- number of devices with stable IPv6 addresses
+- number of devices without a stable IPv6 address
+- number of AAAA records already correct
+- number of AAAA records created
+- number of AAAA records updated
+- number of outdated AAAA records deleted
+- number of synchronization errors
+
 ## Current Scope
 
-FritzBoxSync currently focuses on IPv4 devices managed through Technitium DHCP reservations.
+FritzBoxSync synchronizes devices managed through Technitium DHCP reservations.
 
-IPv6 devices using SLAAC and IPv6 Privacy Extensions are not synchronized in the same way because their addresses are not currently managed through Technitium DHCP reservations.
+### IPv4 Synchronization
+
+For IPv4 synchronization:
+
+- Technitium DHCP reservations are used as the source of device hostnames.
+- Devices are matched with FRITZ!Box devices using their MAC addresses.
+- The Technitium hostname is synchronized to the FRITZ!Box Friendly Name.
+
+### IPv6 Synchronization
+
+FritzBoxSync also synchronizes stable IPv6 addresses for devices that are found in both Technitium DHCP reservations and the FRITZ!Box LAN device list.
+
+The application supports:
+
+- IPv6 Global Unicast Addresses (GUA)
+- IPv6 Unique Local Addresses (ULA)
+- Multiple stable IPv6 addresses per device
+- Automatic creation of missing AAAA records
+- Updating of existing AAAA records
+- Removal of outdated AAAA records
+- Configurable IPv6 TTL
+- Synchronization of Technitium DNS record comments
+
+IPv6 addresses are matched to devices using their MAC addresses. Temporary or privacy-related IPv6 addresses are not treated as stable addresses.
+
+If a device currently has no stable IPv6 address, existing AAAA records are not automatically deleted. This prevents temporary loss of IPv6 connectivity from causing unwanted DNS record deletion.
 
 ## Security
 
