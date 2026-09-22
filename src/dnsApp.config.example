@@ -6,9 +6,14 @@
 
   "fritzBoxUrl": "http://192.168.178.1:49000",
   "fritzBoxHttpsUrl": "https://192.168.178.1:49443",
+  "fritzBoxWebUrl": "http://192.168.178.1",
   "fritzUsername": "YOUR_FRITZBOX_USERNAME",
   "fritzPassword": "YOUR_FRITZBOX_PASSWORD",
 
   "technitiumApiUrl": "http://192.168.178.2:5380",
   "technitiumApiToken": "YOUR_TECHNITIUM_API_TOKEN"
+
+  "EnableIpv6Sync": true,
+  "Ipv6Ttl": 3600,
+  "TechnitiumDnsZone": "YOUR DOMAIN"
 }

@@ -5,6 +5,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -24,31 +25,127 @@ public sealed class App : IDnsApplication
     public string Description =>
         "Synchronizes Technitium DHCP reservation hostnames to FRITZ!Box FriendlyNames by MAC address.";
 
-    public Task InitializeAsync(IDnsServer dnsServer, string? config)
+    public async Task InitializeAsync(
+    IDnsServer dnsServer,
+    string? config)
+{
+    _dnsServer = dnsServer;
+
+    if (string.IsNullOrWhiteSpace(config))
+        throw new InvalidOperationException(
+            "FRITZ!Box Sync app config is missing.");
+
+    _config = JsonSerializer.Deserialize<Config>(
+        config,
+        JsonOptions)
+        ?? throw new InvalidOperationException(
+            "Invalid FRITZ!Box Sync app config.");
+
+    bool configChanged = false;
+
+    if (_config.IntervalMinutes < 1)
     {
-        _dnsServer = dnsServer;
-
-        if (string.IsNullOrWhiteSpace(config))
-            throw new InvalidOperationException("FRITZ!Box Sync app config is missing.");
-
-        _config = JsonSerializer.Deserialize<Config>(config, JsonOptions)
-            ?? throw new InvalidOperationException("Invalid FRITZ!Box Sync app config.");
-
-        if (_config.IntervalMinutes < 1)
-            _config.IntervalMinutes = 15;
-
-        Log("App initialisiert.");
-
-        return StartAsync();
+        _config.IntervalMinutes = 15;
+        configChanged = true;
     }
 
+    if (string.IsNullOrWhiteSpace(_config.FritzBoxWebUrl))
+    {
+        _config.FritzBoxWebUrl =
+            _config.FritzBoxUrl
+                .Replace(
+                    ":49000",
+                    "",
+                    StringComparison.OrdinalIgnoreCase)
+                .TrimEnd('/');
+
+        configChanged = true;
+
+        Log(
+            $"FritzBoxWebUrl complemented: {_config.FritzBoxWebUrl}");
+    }
+
+    if (configChanged)
+{
+    _ = Task.Run(async () =>
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(15));
+
+            await SaveAppConfigAsync();
+        }
+        catch (Exception ex)
+{
+    Log(
+        $"Error saving app configuration: {ex}");
+}
+    });
+}
+
+    Log("App initialized.");
+
+    await StartAsync();
+}
+
+private async Task SaveAppConfigAsync()
+{
+    if (string.IsNullOrWhiteSpace(_config?.TechnitiumApiUrl))
+    {
+        Log("TechnitiumApiUrl is not configured..");
+        return;
+    }
+
+    if (string.IsNullOrWhiteSpace(_config.TechnitiumApiToken))
+    {
+        Log("TechnitiumApiToken is not configured..");
+        return;
+    }
+
+    JsonSerializerOptions saveOptions = new(JsonOptions)
+{
+    WriteIndented = true
+};
+
+string appConfig =
+    JsonSerializer.Serialize(_config, saveOptions);
+
+    string apiUrl =
+        $"{_config.TechnitiumApiUrl.TrimEnd('/')}/api/apps/config/set";
+
+    using HttpClient httpClient = CreateHttpClient();
+
+    using FormUrlEncodedContent content =
+        new FormUrlEncodedContent(
+            new Dictionary<string, string>
+            {
+                ["token"] = _config.TechnitiumApiToken,
+                ["name"] = "FritzboxSync",
+                ["config"] = appConfig
+            });
+
+    using HttpResponseMessage response =
+        await httpClient.PostAsync(apiUrl, content);
+
+    string responseBody =
+        await response.Content.ReadAsStringAsync();
+
+    if (!response.IsSuccessStatusCode)
+    {
+        throw new InvalidOperationException(
+            $"Technitium App-Config could not be saved.. " +
+            $"HTTP {(int)response.StatusCode}: {responseBody}");
+    }
+
+    Log("App configuration successfully saved via the Technitium API..");
+}
     public Task StartAsync()
     {
-        Log("App wird gestartet.");
+        Log("App is starting.");
 
         if (!_config!.Enabled)
         {
-            Log("FRITZ!Box Sync ist deaktiviert.");
+            Log("FRITZ!Box Sync is disabled..");
             return Task.CompletedTask;
         }
 
@@ -96,7 +193,7 @@ public sealed class App : IDnsApplication
         }
         catch (Exception ex)
         {
-            Log("Synchronisation fehlgeschlagen: " + ex);
+            Log("Synchronization failed: " + ex);
         }
     }
 
@@ -105,7 +202,7 @@ public sealed class App : IDnsApplication
         Config cfg = _config!;
 
         Log("============================================");
-        Log("FRITZ!Box Sync - Synchronisation gestartet");
+        Log("FRITZ!Box Sync - Synchronization started");
         Log("============================================");
 
         using HttpClient techClient = CreateHttpClient();
@@ -118,36 +215,33 @@ public sealed class App : IDnsApplication
                 cfg,
                 cancellationToken);
 
-        Log($"Technitium: {reservations.Count} reservierte Geräte.");
+        Log($"Technitium: {reservations.Count} reserved devices.");
 
-        using HttpClient fritzClient = CreateFritzClient(cfg);
+        using HttpClient fritzClient =
+            FritzBoxClient.CreateHttpClient(
+                cfg.FritzUsername,
+                cfg.FritzPassword);
 
-        string hostListPath =
-            await GetHostListPathAsync(
+        FritzBoxClient fritzBox =
+            new(
                 fritzClient,
-                cfg,
-                cancellationToken);
+                cfg);
 
-        string hostListUrl =
-            BuildHostListUrl(cfg, hostListPath);
+        List<FritzBoxClient.FritzDevice> fritzDevices =
+    await fritzBox.GetHostListAsync(
+        cancellationToken);
 
-        string xml =
-            await fritzClient.GetStringAsync(
-                hostListUrl,
-                cancellationToken);
+        
 
-        List<FritzDevice> fritzDevices =
-            ParseFritzHostList(xml);
+        Log($"FRITZ!Box: {fritzDevices.Count} Devices.");
 
-        Log($"FRITZ!Box: {fritzDevices.Count} Geräte.");
-
-        Dictionary<string, FritzDevice> byMac =
-            fritzDevices
-                .Where(x => !string.IsNullOrWhiteSpace(x.Mac))
-                .GroupBy(x => NormalizeMac(x.Mac))
-                .ToDictionary(
-                    x => x.Key,
-                    x => x.First());
+    Dictionary<string, FritzBoxClient.FritzDevice> byMac =
+        fritzDevices
+            .Where(x => !string.IsNullOrWhiteSpace(x.Mac))
+            .GroupBy(x => NormalizeMac(x.Mac))
+            .ToDictionary(
+                x => x.Key,
+                x => x.First());
 
         int ok = 0;
         int changes = 0;
@@ -160,7 +254,9 @@ public sealed class App : IDnsApplication
 
             string mac = NormalizeMac(lease.HardwareAddress);
 
-            if (!byMac.TryGetValue(mac, out FritzDevice? fritz))
+            if (!byMac.TryGetValue(
+                mac,
+                out FritzBoxClient.FritzDevice? fritz))
             {
                 notFound++;
 
@@ -191,7 +287,7 @@ public sealed class App : IDnsApplication
 
             if (cfg.DryRun)
             {
-                Log("  -> TESTMODUS: keine Änderung");
+                Log("  -> TEST MODE: no change");
 
                 changes++;
                 continue;
@@ -199,14 +295,12 @@ public sealed class App : IDnsApplication
 
             try
             {
-                await SetFriendlyNameByMacAsync(
-                    fritzClient,
-                    cfg,
+                await fritzBox.SetFriendlyNameByMacAsync(
                     mac,
                     desiredName,
                     cancellationToken);
 
-                Log("  -> erfolgreich geändert.");
+                Log("  -> successfully changed.");
 
                 changes++;
             }
@@ -215,24 +309,964 @@ public sealed class App : IDnsApplication
                 errors++;
 
                 Log(
-                    "  -> FEHLER beim Ändern: " +
+                    "  -> Error while modifying: " +
                     ex.Message);
             }
         }
 
         Log("============================================");
-        Log($"Reservierungen : {reservations.Count}");
-        Log($"FRITZ Geräte   : {fritzDevices.Count}");
-        Log($"OK             : {ok}");
-        Log($"Änderungen     : {changes}");
-        Log($"Nicht gefunden : {notFound}");
-        Log($"Fehler         : {errors}");
+        Log($"Reservations     : {reservations.Count}");
+        Log($"FRITZ! devices   : {fritzDevices.Count}");
+        Log($"OK               : {ok}");
+        Log($"Changes          : {changes}");
+        Log($"Not found        : {notFound}");
+        Log($"Error            : {errors}");
+
+        if (cfg.EnableIpv6Sync)
+        {
+            await SynchronizeIpv6Async(
+                fritzBox,
+                fritzDevices,
+                reservations,
+                cfg,
+                cancellationToken);
+        }
+        else
+        {
+            Log("IPv6 synchronization is disabled.");
+        }
 
         if (cfg.DryRun)
             Log(
-                "TESTMODUS aktiv - es wurden KEINE Änderungen vorgenommen.");
+                "TEST MODE active – NO changes were made.");
 
         Log("============================================");
+    }
+
+   private async Task SynchronizeIpv6Async(
+    FritzBoxClient fritzBox,
+    List<FritzBoxClient.FritzDevice> fritzDevices,
+    List<ReservedLease> reservations,
+    Config cfg,
+    CancellationToken cancellationToken)
+{
+    Log("--------------------------------------------");
+    Log("IPv6 synchronization started");
+
+    if (string.IsNullOrWhiteSpace(cfg.TechnitiumApiToken))
+    {
+        Log("IPv6: No Technitium API token configured.");
+        return;
+    }
+
+    try
+    {
+        Log("IPv6: FRITZ!Box SID is being retrieved...");
+
+        string sid =
+            await fritzBox.GetSidAsync(
+                cancellationToken);
+
+        Log("IPv6: FRITZ!Box SID successfully receivedn.");
+
+        Log("IPv6: FRITZ!Box LAN devices are being retrieved....");
+
+        List<FritzBoxClient.FritzLanDevice> lanDevices =
+            await fritzBox.GetLanDevicesAsync(
+                sid,
+                cancellationToken);
+
+        Log(
+            $"IPv6: FRITZ!Box LAN devices successfully read: " +
+            $"{lanDevices.Count}");
+
+        Dictionary<string, FritzBoxClient.FritzLanDevice>
+            lanDevicesByMac =
+                lanDevices
+                    .Where(x =>
+                        !string.IsNullOrWhiteSpace(x.Mac))
+                    .GroupBy(x =>
+                        NormalizeMac(x.Mac!))
+                    .ToDictionary(
+                        x => x.Key,
+                        x => x.First());
+
+        using HttpClient techClient =
+            CreateHttpClient();
+
+        Log(
+            "IPv6: Technitium DNS records are being retrieved...");
+
+        List<TechnitiumRecord> records =
+            await GetTechnitiumRecordsAsync(
+                techClient,
+                cfg,
+                cancellationToken);
+
+        Log(
+            $"IPv6: Technitium DNS records successfully read: " +
+            $"{records.Count}");
+
+        int stableDevices = 0;
+        int alreadyPresent = 0;
+        int added = 0;
+        int updated = 0;
+        int deleted = 0;
+        int aaaaChecked = 0;
+        int noStableIpv6 = 0;
+        int errors = 0;
+
+        foreach (ReservedLease lease in reservations)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            string mac =
+                NormalizeMac(lease.HardwareAddress);
+
+            if (!lanDevicesByMac.TryGetValue(
+                    mac,
+                    out FritzBoxClient.FritzLanDevice? device))
+            {
+                continue;
+            }
+
+            List<string> desiredIpv6 =
+                GetStableIpv6(device);
+
+            if (desiredIpv6.Count == 0)
+            {
+                noStableIpv6++;
+
+                Log(
+                    $"IPv6: {lease.HostName} " +
+                    $"does not have a stable IPv6 address..");
+
+                continue;
+            }
+
+            stableDevices++;
+
+            string dnsName =
+                NormalizeDnsName(
+                    lease.HostName,
+                    cfg.TechnitiumDnsZone);
+
+            string desiredComment =
+                $"FritzBoxSync - FRITZ!Box: {device.Name}";
+
+            if (desiredComment.Length > 255)
+            {
+                desiredComment =
+                    desiredComment.Substring(0, 255);
+            }
+
+            Log(
+                $"IPv6 SYNC: {dnsName}");
+
+            Log(
+                $"  FRITZ!Box IPv6: {desiredIpv6.Count}");
+
+            foreach (string ip in desiredIpv6)
+            {
+                Log(
+                    $"    FRITZ -> {ip}");
+            }
+
+            /*
+             * --------------------------------------------------------
+             * EXISTIERENDE AAAA-RECORDS DIESES HOSTNAMENS
+             * --------------------------------------------------------
+             */
+
+            List<TechnitiumRecord> existingRecords =
+                records
+                    .Where(x =>
+                        string.Equals(
+                            x.Type,
+                            "AAAA",
+                            StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(
+                            NormalizeDnsName(
+                                x.Name,
+                                cfg.TechnitiumDnsZone),
+                            dnsName,
+                            StringComparison.OrdinalIgnoreCase) &&
+                        !string.IsNullOrWhiteSpace(
+                            x.IpAddress))
+                    .ToList();
+
+            /*
+             * --------------------------------------------------------
+             * FRITZ!BOX = SOLL
+             * TECHNITIUM = IST
+             * --------------------------------------------------------
+             */
+
+            HashSet<string> desiredSet =
+                desiredIpv6
+                    .Select(NormalizeIpv6)
+                    .ToHashSet(
+                        StringComparer.OrdinalIgnoreCase);
+
+            HashSet<string> existingSet =
+                existingRecords
+                    .Select(x =>
+                        NormalizeIpv6(x.IpAddress!))
+                    .ToHashSet(
+                        StringComparer.OrdinalIgnoreCase);
+
+            /*
+             * --------------------------------------------------------
+             * 1. NEUE IPv6-ADRESSEN
+             * --------------------------------------------------------
+             */
+
+            foreach (string desiredIp in desiredSet)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                aaaaChecked++;
+
+                if (existingSet.Contains(desiredIp))
+                {
+                    TechnitiumRecord existing =
+                        existingRecords.First(x =>
+                            string.Equals(
+                                NormalizeIpv6(x.IpAddress!),
+                                desiredIp,
+                                StringComparison.OrdinalIgnoreCase));
+
+                    bool commentCorrect =
+                        string.Equals(
+                            existing.Comments,
+                            desiredComment,
+                            StringComparison.Ordinal);
+
+                    bool ttlCorrect =
+                        existing.Ttl == cfg.Ipv6Ttl;
+
+                    if (!commentCorrect ||
+                        !ttlCorrect)
+                    {
+                        Log(
+                            $"  -> AAAA UPDATE: {desiredIp}");
+
+                        Log(
+                            $"     Comment: " +
+                            $"{existing.Comments} -> " +
+                            $"{desiredComment}");
+
+                        Log(
+                            $"     TTL: " +
+                            $"{existing.Ttl} -> " +
+                            $"{cfg.Ipv6Ttl}");
+
+                        if (cfg.DryRun)
+                        {
+                            Log(
+                                "     -> TEST MODE: " +
+                                "would be updated.");
+
+                            updated++;
+                        }
+                        else
+                        {
+                            try
+                            {
+                                await UpdateTechnitiumAaaaAsync(
+                                    techClient,
+                                    cfg,
+                                    dnsName,
+                                    existing,
+                                    desiredIp,
+                                    desiredComment,
+                                    cancellationToken);
+
+                                int index =
+                                    records.IndexOf(existing);
+
+                                if (index >= 0)
+                                {
+                                    records[index] =
+                                        existing with
+                                        {
+                                            IpAddress = desiredIp,
+                                            Comments = desiredComment,
+                                            Ttl = cfg.Ipv6Ttl
+                                        };
+                                }
+
+                                updated++;
+                            }
+                            catch (Exception ex)
+                            {
+                                errors++;
+
+                                Log(
+                                    "     -> Error during update: " +
+                                    ex.Message);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        Log(
+                            $"  -> AAAA already correct: {desiredIp}");
+
+                        alreadyPresent++;
+                    }
+
+                    continue;
+                }
+
+                /*
+                 * IPv6 fehlt in Technitium
+                 */
+
+                Log(
+                    $"  -> AAAA MISSING: {desiredIp}");
+
+                if (cfg.DryRun)
+                {
+                    Log(
+                        "     -> TEST MODE: " +
+                        "would be created.");
+
+                    added++;
+                }
+                else
+                {
+                    try
+                    {
+                        await AddTechnitiumAaaaAsync(
+                            techClient,
+                            cfg,
+                            dnsName,
+                            desiredIp,
+                            desiredComment,
+                            cancellationToken);
+
+                        records.Add(
+                            new TechnitiumRecord(
+                                dnsName,
+                                "AAAA",
+                                desiredIp,
+                                desiredComment,
+                                cfg.Ipv6Ttl));
+
+                        added++;
+                    }
+                    catch (Exception ex)
+                    {
+                        errors++;
+
+                        Log(
+                            "     -> Error during ADD: " +
+                            ex.Message);
+                    }
+                }
+            }
+
+            /*
+             * --------------------------------------------------------
+             * 2. ALTE IPv6-ADRESSEN LÖSCHEN
+             *
+             * Alles was in Technitium vorhanden ist,
+             * aber von der FRITZ!Box nicht mehr geliefert wird.
+             * --------------------------------------------------------
+             */
+
+            foreach (TechnitiumRecord existing
+                     in existingRecords)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (string.IsNullOrWhiteSpace(
+                        existing.IpAddress))
+                {
+                    continue;
+                }
+
+                aaaaChecked++;
+
+                string existingIp =
+                    NormalizeIpv6(
+                        existing.IpAddress);
+
+                if (desiredSet.Contains(existingIp))
+                {
+                    continue;
+                }
+
+                Log(
+                    $"  -> AAAA VERALTET: {existingIp}");
+
+                if (cfg.DryRun)
+                {
+                    Log(
+                        "     -> Test Mode: " +
+                        "would be deletedt.");
+
+                    deleted++;
+                }
+                else
+                {
+                    try
+                    {
+                        await DeleteTechnitiumAaaaAsync(
+                            techClient,
+                            cfg,
+                            dnsName,
+                            existingIp,
+                            cancellationToken);
+
+                        records.Remove(existing);
+
+                        deleted++;
+                    }
+                    catch (Exception ex)
+                    {
+                        errors++;
+
+                        Log(
+                            "     -> Error during DELETE: " +
+                            ex.Message);
+                    }
+                }
+            }
+        }
+
+        Log("--------------------------------------------");
+        Log(
+            $"IPv6 sturdy devices           : {stableDevices}");
+
+        Log(
+            $"IPv6 without a stable address : {noStableIpv6}");
+
+        Log(
+            $"AAAA already correct          : {alreadyPresent}");
+
+        Log(
+            $"AAAA checked overall          : {aaaaChecked}");
+
+        Log(
+            $"AAAA newly created            : {added}");
+
+        Log(
+            $"AAAA updated                  : {updated}");
+
+        Log(
+            $"AAAA deleted                  : {deleted}");
+
+        Log(
+            $"IPv6 Error                    : {errors}");
+
+        if (cfg.DryRun)
+        {
+            Log(
+                "IPv6 Test Mode: " +
+                "NO changes were made..");
+        }
+    }
+    catch (Exception ex)
+    {
+        Log(
+            "IPv6 synchronization failed: " +
+            ex.GetType().Name +
+            ": " +
+            ex.Message);
+    }
+}
+
+    private static List<string> GetStableIpv6(
+    FritzBoxClient.FritzLanDevice device)
+{
+    if (device.IpList is null)
+        return new List<string>();
+
+    return device.IpList
+        .Where(x =>
+            string.Equals(
+                x.AddrType,
+                "IPv6-GUA",
+                StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(
+                x.AddrType,
+                "IPv6-ULA",
+                StringComparison.OrdinalIgnoreCase))
+        .Select(x => NormalizeIpv6(x.Ip))
+        .Where(x => !string.IsNullOrWhiteSpace(x))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToList();
+}
+
+private static string NormalizeIpv6(string ipAddress)
+{
+    if (string.IsNullOrWhiteSpace(ipAddress))
+        return "";
+
+    if (!IPAddress.TryParse(
+            ipAddress,
+            out IPAddress? address))
+    {
+        return ipAddress.Trim();
+    }
+
+    if (address.AddressFamily !=
+        System.Net.Sockets.AddressFamily.InterNetworkV6)
+    {
+        return ipAddress.Trim();
+    }
+
+    return address.ToString();
+}
+
+    private static string CreateFritzPbkdf2Response(
+        string challenge,
+        string password)
+    {
+        string[] parts =
+            challenge.Split('$');
+
+        if (parts.Length != 5 ||
+            parts[0] != "2")
+        {
+            throw new FormatException(
+                "Invalid FRITZ!Box PBKDF2 challenge format.");
+        }
+
+        int iterations1 =
+            int.Parse(parts[1]);
+
+        string salt1Hex = parts[2];
+
+        int iterations2 =
+            int.Parse(parts[3]);
+
+        string salt2Hex = parts[4];
+
+        byte[] salt1 =
+            Convert.FromHexString(salt1Hex);
+
+        byte[] salt2 =
+            Convert.FromHexString(salt2Hex);
+
+        byte[] passwordBytes =
+            Encoding.UTF8.GetBytes(password);
+
+        byte[] hash1 =
+            Rfc2898DeriveBytes.Pbkdf2(
+                passwordBytes,
+                salt1,
+                iterations1,
+                HashAlgorithmName.SHA256,
+                32);
+
+        byte[] hash2 =
+            Rfc2898DeriveBytes.Pbkdf2(
+                hash1,
+                salt2,
+                iterations2,
+                HashAlgorithmName.SHA256,
+                32);
+
+        return
+            Convert.ToHexString(salt2).ToLowerInvariant() +
+            "$" +
+            Convert.ToHexString(hash2).ToLowerInvariant();
+    }
+
+    
+
+    
+
+    private static async Task<List<TechnitiumRecord>>
+    GetTechnitiumRecordsAsync(
+        HttpClient client,
+        Config cfg,
+        CancellationToken cancellationToken)
+{
+    string zone =
+        cfg.TechnitiumDnsZone.Trim().TrimEnd('.');
+
+    string url =
+        $"{cfg.TechnitiumApiUrl.TrimEnd('/')}" +
+        "/api/zones/records/get" +
+        $"?domain={Uri.EscapeDataString(zone)}" +
+        $"&zone={Uri.EscapeDataString(zone)}" +
+        "&listZone=true";
+
+    using HttpRequestMessage request =
+        new(HttpMethod.Get, url);
+
+    request.Headers.Authorization =
+        new AuthenticationHeaderValue(
+            "Bearer",
+            cfg.TechnitiumApiToken);
+
+    using HttpResponseMessage response =
+        await client.SendAsync(
+            request,
+            cancellationToken);
+
+    string body =
+        await response.Content.ReadAsStringAsync(
+            cancellationToken);
+
+    response.EnsureSuccessStatusCode();
+
+    using JsonDocument doc =
+        JsonDocument.Parse(body);
+
+    if (!doc.RootElement.TryGetProperty(
+            "response",
+            out JsonElement responseElement) ||
+        !responseElement.TryGetProperty(
+            "records",
+            out JsonElement records))
+    {
+        throw new InvalidOperationException(
+            "Technitium API liefert keine records.");
+    }
+
+    List<TechnitiumRecord> result = new();
+
+    foreach (JsonElement record in
+             records.EnumerateArray())
+    {
+        string? name =
+            GetString(record, "name");
+
+        string? type =
+            GetString(record, "type");
+
+        if (string.IsNullOrWhiteSpace(name) ||
+            string.IsNullOrWhiteSpace(type))
+        {
+            continue;
+        }
+
+        string? ipAddress = null;
+
+        if (record.TryGetProperty(
+                "rData",
+                out JsonElement rData) &&
+            rData.ValueKind == JsonValueKind.Object)
+        {
+            ipAddress =
+                GetString(rData, "ipAddress");
+        }
+
+        string? comments =
+            GetString(record, "comments");
+
+        int ttl = 0;
+
+        if (record.TryGetProperty(
+                "ttl",
+                out JsonElement ttlElement) &&
+            ttlElement.ValueKind == JsonValueKind.Number)
+        {
+            ttlElement.TryGetInt32(out ttl);
+        }
+
+        result.Add(
+            new TechnitiumRecord(
+                name,
+                type,
+                ipAddress,
+                comments,
+                ttl));
+    }
+
+    return result;
+}
+
+   
+
+private static bool IsIpv6Ula(string ipAddress)
+{
+    if (!IPAddress.TryParse(
+            ipAddress,
+            out IPAddress? address))
+    {
+        return false;
+    }
+
+    if (address.AddressFamily !=
+        System.Net.Sockets.AddressFamily.InterNetworkV6)
+    {
+        return false;
+    }
+
+    byte firstByte =
+        address.GetAddressBytes()[0];
+
+    // IPv6 ULA: fc00::/7
+    return (firstByte & 0xFE) == 0xFC;
+}
+
+    private async Task AddTechnitiumAaaaAsync(
+    HttpClient client,
+    Config cfg,
+    string dnsName,
+    string ipAddress,
+    string comments,
+    CancellationToken cancellationToken)
+{
+    string zone =
+        cfg.TechnitiumDnsZone.Trim().TrimEnd('.');
+
+    string url =
+        $"{cfg.TechnitiumApiUrl.TrimEnd('/')}" +
+        "/api/zones/records/add" +
+        $"?domain={Uri.EscapeDataString(dnsName)}" +
+        $"&zone={Uri.EscapeDataString(zone)}" +
+        "&type=AAAA" +
+        $"&ttl={cfg.Ipv6Ttl}" +
+        $"&ipAddress={Uri.EscapeDataString(ipAddress)}" +
+        $"&comments={Uri.EscapeDataString(comments)}";
+
+    using HttpRequestMessage request =
+        new(HttpMethod.Get, url);
+
+    request.Headers.Authorization =
+        new AuthenticationHeaderValue(
+            "Bearer",
+            cfg.TechnitiumApiToken);
+
+    using HttpResponseMessage response =
+        await client.SendAsync(
+            request,
+            cancellationToken);
+
+    string body =
+        await response.Content.ReadAsStringAsync(
+            cancellationToken);
+
+    if (!response.IsSuccessStatusCode)
+    {
+        throw new HttpRequestException(
+            $"Technitium AAAA ADD API returned " +
+            $"{(int)response.StatusCode} " +
+            $"{response.StatusCode}: {body}");
+    }
+
+    using JsonDocument doc =
+        JsonDocument.Parse(body);
+
+    if (doc.RootElement.TryGetProperty(
+            "status",
+            out JsonElement statusElement))
+    {
+        string? status =
+            statusElement.GetString();
+
+        if (!string.Equals(
+                status,
+                "ok",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            string message = "";
+
+            if (doc.RootElement.TryGetProperty(
+                    "message",
+                    out JsonElement messageElement))
+            {
+                message =
+                    messageElement.GetString() ?? "";
+            }
+
+            throw new InvalidOperationException(
+                $"Technitium AAAA ADD Fehler: {message}");
+        }
+    }
+
+    Log(
+        $"  -> AAAA angelegt: {ipAddress}");
+}
+
+private async Task DeleteTechnitiumAaaaAsync(
+    HttpClient client,
+    Config cfg,
+    string dnsName,
+    string ipAddress,
+    CancellationToken cancellationToken)
+{
+    string zone =
+        cfg.TechnitiumDnsZone.Trim().TrimEnd('.');
+
+    string url =
+        $"{cfg.TechnitiumApiUrl.TrimEnd('/')}" +
+        "/api/zones/records/delete" +
+        $"?domain={Uri.EscapeDataString(dnsName)}" +
+        $"&zone={Uri.EscapeDataString(zone)}" +
+        "&type=AAAA" +
+        $"&ipAddress={Uri.EscapeDataString(ipAddress)}";
+
+    using HttpRequestMessage request =
+        new(HttpMethod.Get, url);
+
+    request.Headers.Authorization =
+        new AuthenticationHeaderValue(
+            "Bearer",
+            cfg.TechnitiumApiToken);
+
+    using HttpResponseMessage response =
+        await client.SendAsync(
+            request,
+            cancellationToken);
+
+    string body =
+        await response.Content.ReadAsStringAsync(
+            cancellationToken);
+
+    if (!response.IsSuccessStatusCode)
+    {
+        throw new HttpRequestException(
+            $"Technitium AAAA DELETE API returned " +
+            $"{(int)response.StatusCode} " +
+            $"{response.StatusCode}: {body}");
+    }
+
+    using JsonDocument doc =
+        JsonDocument.Parse(body);
+
+    if (doc.RootElement.TryGetProperty(
+            "status",
+            out JsonElement statusElement))
+    {
+        string? status =
+            statusElement.GetString();
+
+        if (!string.Equals(
+                status,
+                "ok",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            string message = "";
+
+            if (doc.RootElement.TryGetProperty(
+                    "message",
+                    out JsonElement messageElement))
+            {
+                message =
+                    messageElement.GetString() ?? "";
+            }
+
+            throw new InvalidOperationException(
+                $"Technitium AAAA DELETE error: {message}");
+        }
+    }
+
+    Log(
+        $"  -> AAAA deleted: {ipAddress}");
+}
+
+private async Task UpdateTechnitiumAaaaAsync(
+    HttpClient client,
+    Config cfg,
+    string dnsName,
+    TechnitiumRecord existing,
+    string newIpAddress,
+    string comments,
+    CancellationToken cancellationToken)
+{
+    if (string.IsNullOrWhiteSpace(
+            existing.IpAddress))
+    {
+        throw new InvalidOperationException(
+            "AAAA update without an existing IP address.");
+    }
+
+    string zone =
+        cfg.TechnitiumDnsZone.Trim().TrimEnd('.');
+
+    string url =
+        $"{cfg.TechnitiumApiUrl.TrimEnd('/')}" +
+        "/api/zones/records/update" +
+        $"?domain={Uri.EscapeDataString(dnsName)}" +
+        $"&zone={Uri.EscapeDataString(zone)}" +
+        "&type=AAAA" +
+        $"&ipAddress={Uri.EscapeDataString(existing.IpAddress)}" +
+        $"&newIpAddress={Uri.EscapeDataString(newIpAddress)}" +
+        $"&ttl={cfg.Ipv6Ttl}" +
+        $"&comments={Uri.EscapeDataString(comments)}";
+
+    using HttpRequestMessage request =
+        new(HttpMethod.Get, url);
+
+    request.Headers.Authorization =
+        new AuthenticationHeaderValue(
+            "Bearer",
+            cfg.TechnitiumApiToken);
+
+    using HttpResponseMessage response =
+        await client.SendAsync(
+            request,
+            cancellationToken);
+
+    string body =
+        await response.Content.ReadAsStringAsync(
+            cancellationToken);
+
+    if (!response.IsSuccessStatusCode)
+    {
+        throw new HttpRequestException(
+            $"Technitium AAAA UPDATE API returned " +
+            $"{(int)response.StatusCode} " +
+            $"{response.StatusCode}: {body}");
+    }
+
+    using JsonDocument doc =
+        JsonDocument.Parse(body);
+
+    if (doc.RootElement.TryGetProperty(
+            "status",
+            out JsonElement statusElement))
+    {
+        string? status =
+            statusElement.GetString();
+
+        if (!string.Equals(
+                status,
+                "ok",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            string message = "";
+
+            if (doc.RootElement.TryGetProperty(
+                    "message",
+                    out JsonElement messageElement))
+            {
+                message =
+                    messageElement.GetString() ?? "";
+            }
+
+            throw new InvalidOperationException(
+                $"Technitium AAAA UPDATE Error: {message}");
+        }
+    }
+
+    Log(
+        $"  -> AAAA updated: " +
+        $"{existing.IpAddress} -> {newIpAddress}");
+}
+
+    private static string NormalizeDnsName(
+        string name,
+        string zone)
+    {
+        string result =
+            name.Trim().TrimEnd('.');
+
+        if (!result.Contains('.',
+                StringComparison.Ordinal))
+        {
+            result += "." + zone.Trim().TrimEnd('.');
+        }
+
+        return result;
     }
 
     private static async Task<List<ReservedLease>>
@@ -326,211 +1360,6 @@ public sealed class App : IDnsApplication
         }
     }
 
-    private static async Task<string> GetHostListPathAsync(
-        HttpClient client,
-        Config cfg,
-        CancellationToken cancellationToken)
-    {
-        const string action =
-            "X_AVM-DE_GetHostListPath";
-
-        string soap =
-            SoapEnvelope($"""
-            <u:{action} xmlns:u="urn:dslforum-org:service:Hosts:1"></u:{action}>
-            """);
-
-        using HttpRequestMessage request =
-            CreateSoapRequest(
-                $"{cfg.FritzBoxUrl.TrimEnd('/')}/upnp/control/hosts",
-                action,
-                soap);
-
-        using HttpResponseMessage response =
-            await client.SendAsync(
-                request,
-                cancellationToken);
-
-        string body =
-            await response.Content.ReadAsStringAsync(
-                cancellationToken);
-
-        response.EnsureSuccessStatusCode();
-
-        XDocument doc =
-            XDocument.Parse(body);
-
-        XElement? value =
-            doc.Descendants()
-                .FirstOrDefault(
-                    x =>
-                        x.Name.LocalName ==
-                        "NewX_AVM-DE_HostListPath");
-
-        if (value is null ||
-            string.IsNullOrWhiteSpace(value.Value))
-        {
-            throw new InvalidOperationException(
-                "FRITZ!Box lieferte keinen HostList-Pfad.");
-        }
-
-        return value.Value.Trim();
-    }
-
-    private static async Task SetFriendlyNameByMacAsync(
-        HttpClient client,
-        Config cfg,
-        string normalizedMac,
-        string friendlyName,
-        CancellationToken cancellationToken)
-    {
-        string action =
-            "X_AVM-DE_SetFriendlyNameByMAC";
-
-        string mac =
-            FormatMac(normalizedMac);
-
-        string escapedName =
-            SecurityElementEscape(friendlyName);
-
-        string soap =
-            SoapEnvelope($"""
-            <u:{action} xmlns:u="urn:dslforum-org:service:Hosts:1">
-              <NewMACAddress>{mac}</NewMACAddress>
-              <NewX_AVM-DE_FriendlyName>{escapedName}</NewX_AVM-DE_FriendlyName>
-            </u:{action}>
-            """);
-
-        using HttpRequestMessage request =
-            CreateSoapRequest(
-                $"{cfg.FritzBoxUrl.TrimEnd('/')}/upnp/control/hosts",
-                action,
-                soap);
-
-        using HttpResponseMessage response =
-            await client.SendAsync(
-                request,
-                cancellationToken);
-
-        string body =
-            await response.Content.ReadAsStringAsync(
-                cancellationToken);
-
-        response.EnsureSuccessStatusCode();
-
-        if (body.Contains(
-                "Fault",
-                StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException(
-                "FRITZ!Box SOAP Fault: " + body);
-        }
-    }
-
-    private static List<FritzDevice> ParseFritzHostList(
-        string xml)
-    {
-        XDocument doc =
-            XDocument.Parse(xml);
-
-        List<FritzDevice> result = new();
-
-        foreach (XElement macNode in
-                 doc.Descendants()
-                    .Where(
-                        x =>
-                            x.Name.LocalName ==
-                            "MACAddress"))
-        {
-            XElement? record =
-                FindRecord(macNode);
-
-            if (record is null)
-                continue;
-
-            string? mac =
-                ChildValue(record, "MACAddress");
-
-            string? ip =
-                ChildValue(record, "IPAddress");
-
-            string? host =
-                ChildValue(record, "HostName");
-
-            string? friendly =
-                ChildValue(
-                    record,
-                    "X_AVM-DE_FriendlyName");
-
-            if (string.IsNullOrWhiteSpace(mac))
-                continue;
-
-            result.Add(
-                new FritzDevice(
-                    mac,
-                    ip,
-                    host,
-                    friendly));
-        }
-
-        return result;
-    }
-
-    private static XElement? FindRecord(
-        XElement macNode)
-    {
-        XElement? current =
-            macNode.Parent;
-
-        while (current is not null)
-        {
-            bool hasIp =
-                current.Descendants()
-                    .Any(
-                        x =>
-                            x.Name.LocalName ==
-                            "IPAddress");
-
-            bool hasHost =
-                current.Descendants()
-                    .Any(
-                        x =>
-                            x.Name.LocalName ==
-                            "HostName");
-
-            bool hasFriendly =
-                current.Descendants()
-                    .Any(
-                        x =>
-                            x.Name.LocalName ==
-                            "X_AVM-DE_FriendlyName");
-
-            if (hasIp ||
-                hasHost ||
-                hasFriendly)
-            {
-                return current;
-            }
-
-            current =
-                current.Parent;
-        }
-
-        return macNode.Parent;
-    }
-
-    private static string? ChildValue(
-        XElement element,
-        string localName)
-    {
-        return element.Descendants()
-            .FirstOrDefault(
-                x =>
-                    x.Name.LocalName ==
-                    localName)
-            ?.Value
-            ?.Trim();
-    }
-
     private static HttpClient CreateHttpClient()
     {
         SocketsHttpHandler handler = new()
@@ -547,68 +1376,6 @@ public sealed class App : IDnsApplication
             TimeSpan.FromSeconds(30);
 
         return client;
-    }
-
-    private static HttpClient CreateFritzClient(
-    Config cfg)
-{
-    HttpClientHandler handler = new()
-    {
-        ServerCertificateCustomValidationCallback =
-            HttpClientHandler
-                .DangerousAcceptAnyServerCertificateValidator,
-
-        Credentials = new NetworkCredential(
-            cfg.FritzUsername,
-            cfg.FritzPassword),
-
-        PreAuthenticate = false
-    };
-
-    HttpClient client =
-        new(handler);
-
-    return client;
-}
-
-    private static string BuildHostListUrl(
-        Config cfg,
-        string path)
-    {
-        if (path.StartsWith(
-                "http://",
-                StringComparison.OrdinalIgnoreCase) ||
-            path.StartsWith(
-                "https://",
-                StringComparison.OrdinalIgnoreCase))
-        {
-            return path;
-        }
-
-        return
-            $"{cfg.FritzBoxHttpsUrl.TrimEnd('/')}/" +
-            $"{path.TrimStart('/')}";
-    }
-
-    private static HttpRequestMessage CreateSoapRequest(
-        string url,
-        string action,
-        string body)
-    {
-        HttpRequestMessage request =
-            new(HttpMethod.Post, url);
-
-        request.Headers.TryAddWithoutValidation(
-            "SOAPAction",
-            $"\"urn:dslforum-org:service:Hosts:1#{action}\"");
-
-        request.Content =
-            new StringContent(
-                body,
-                Encoding.UTF8,
-                "text/xml");
-
-        return request;
     }
 
     private static string SoapEnvelope(
@@ -734,13 +1501,17 @@ public sealed class App : IDnsApplication
             PropertyNameCaseInsensitive = true
         };
 
-    private sealed class Config
+    internal sealed class Config
     {
         public bool Enabled { get; set; } = true;
 
         public bool DryRun { get; set; } = true;
 
         public bool RunOnStartup { get; set; } = true;
+
+        public bool EnableIpv6Sync { get; set; } = true;
+
+        public int Ipv6Ttl { get; set; } = 3600;
 
         public int IntervalMinutes { get; set; } = 15;
 
@@ -750,6 +1521,8 @@ public sealed class App : IDnsApplication
         public string FritzBoxHttpsUrl { get; set; } =
             "https://192.168.178.1:49443";
 
+        public string FritzBoxWebUrl { get; set; } = "";
+
         public string FritzUsername { get; set; } =
             "TechnitiumSync";
 
@@ -757,6 +1530,9 @@ public sealed class App : IDnsApplication
 
         public string TechnitiumApiUrl { get; set; } =
             "http://192.168.178.2:5380";
+
+        public string TechnitiumDnsZone { get; set; } =
+            "koch.local";
 
         public string TechnitiumApiToken { get; set; } = "";
     }
@@ -766,9 +1542,11 @@ public sealed class App : IDnsApplication
         string Address,
         string HostName);
 
-    private sealed record FritzDevice(
-        string Mac,
+    private sealed record TechnitiumRecord(
+        string Name,
+        string Type,
         string? IpAddress,
-        string? HostName,
-        string? FriendlyName);
+        string? Comments,
+        int Ttl);
+
 }
