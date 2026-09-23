@@ -140,20 +140,32 @@ string appConfig =
     Log("App configuration successfully saved via the Technitium API..");
 }
     public Task StartAsync()
-    {
-        Log("App is starting.");
+{
+    Log("App is starting.");
 
-        if (!_config!.Enabled)
+    if (!_config!.Enabled)
+    {
+        Log("FRITZ!Box Sync is disabled.");
+        return Task.CompletedTask;
+    }
+
+    CancellationTokenSource cts = new();
+
+    lock (_sync)
+    {
+        if (_cts is not null)
         {
-            Log("FRITZ!Box Sync is disabled..");
+            cts.Dispose();
+            Log("FRITZ!Box Sync worker is already running.");
             return Task.CompletedTask;
         }
 
-        _cts = new CancellationTokenSource();
-        _worker = Task.Run(() => WorkerAsync(_cts.Token));
-
-        return Task.CompletedTask;
+        _cts = cts;
+        _worker = Task.Run(() => WorkerAsync(cts.Token));
     }
+
+    return Task.CompletedTask;
+}
 
     public void Dispose()
     {
@@ -367,9 +379,9 @@ string appConfig =
             await fritzBox.GetSidAsync(
                 cancellationToken);
 
-        Log("IPv6: FRITZ!Box SID successfully receivedn.");
+        Log("IPv6: FRITZ!Box SID successfully received.");
 
-        Log("IPv6: FRITZ!Box LAN devices are being retrieved....");
+        Log("IPv6: FRITZ!Box LAN devices are being retrieved..");
 
         List<FritzBoxClient.FritzLanDevice> lanDevices =
             await fritzBox.GetLanDevicesAsync(
@@ -415,6 +427,8 @@ string appConfig =
         int aaaaChecked = 0;
         int noStableIpv6 = 0;
         int errors = 0;
+
+        List<Ipv6PtrDesired> desiredPtrs = new();
 
         foreach (ReservedLease lease in reservations)
         {
@@ -470,6 +484,22 @@ string appConfig =
             {
                 Log(
                     $"    FRITZ -> {ip}");
+
+                string reverseName = CreateIpv6ReverseName(ip);
+                string reverseZone = CreateIpv6ReverseZone(ip);
+
+                if (!string.IsNullOrWhiteSpace(reverseName) && !string.IsNullOrWhiteSpace(reverseZone))
+                {
+                    reverseName = $"{reverseName}.{reverseZone}";
+
+                    desiredPtrs.Add(
+                        new Ipv6PtrDesired(
+                            ip,
+                            reverseName,
+                            reverseZone,
+                            dnsName,
+                            desiredComment));
+                }
             }
 
             /*
@@ -761,6 +791,18 @@ string appConfig =
         Log(
             $"IPv6 Error                    : {errors}");
 
+        Log(
+            $"IPv6 PTR Sync enabled         : {cfg.EnableIpv6PtrSync}");
+
+        if (cfg.EnableIpv6PtrSync)
+        {
+            await SynchronizeIpv6PtrAsync(
+                techClient,
+                cfg,
+                desiredPtrs,
+                cancellationToken);
+        }
+
         if (cfg.DryRun)
         {
             Log(
@@ -776,6 +818,639 @@ string appConfig =
             ": " +
             ex.Message);
     }
+}
+
+
+    private async Task SynchronizeIpv6PtrAsync(
+        HttpClient client,
+        Config cfg,
+        List<Ipv6PtrDesired> desired,
+        CancellationToken cancellationToken)
+    {
+        Log("--------------------------------------------");
+        Log("IPv6 PTR synchronization started");
+        Log($"PTR: desired records prepared: {desired.Count}");
+
+        if (desired.Count == 0)
+        {
+            Log("PTR: no stable IPv6 addresses available.");
+            return;
+        }
+
+        try
+        {
+            int checkedCount = 0;
+            int alreadyCorrect = 0;
+            int added = 0;
+            int updated = 0;
+            int errors = 0;
+
+            foreach (var zoneGroup in
+                     desired.GroupBy(
+                         x => x.ReverseZone,
+                         StringComparer.OrdinalIgnoreCase))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                string reverseZone = zoneGroup.Key;
+                List<Ipv6PtrDesired> zoneDesired =
+                    zoneGroup.ToList();
+
+                Log($"PTR: checking reverse zone {reverseZone}");
+
+                if (!await EnsureTechnitiumReverseZoneAsync(
+                        client,
+                        cfg,
+                        reverseZone,
+                        CreateIpv6ReverseNetworkCidr(
+                            zoneDesired[0].IpAddress),
+                        cancellationToken))
+                {
+                    errors++;
+                    continue;
+                }
+
+                foreach (Ipv6PtrDesired wanted in zoneDesired)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    checkedCount++;
+
+                    Log(
+                        $"PTR check: {wanted.IpAddress} -> {wanted.TargetName} " +
+                        $"(owner: {wanted.ReverseName})");
+
+                    TechnitiumPtrRecord? current =
+                        await GetTechnitiumPtrRecordAsync(
+                            client,
+                            cfg,
+                            reverseZone,
+                            wanted.ReverseName,
+                            cancellationToken);
+
+                    if (current is not null)
+                    {
+                        bool targetCorrect =
+                            string.Equals(
+                                NormalizeDnsName(
+                                    current.PtrName,
+                                    cfg.TechnitiumDnsZone),
+                                NormalizeDnsName(
+                                    wanted.TargetName,
+                                    cfg.TechnitiumDnsZone),
+                                StringComparison.OrdinalIgnoreCase);
+
+                        bool commentCorrect =
+                            string.Equals(
+                                current.Comments,
+                                wanted.Comment,
+                                StringComparison.Ordinal);
+
+                        bool ttlCorrect =
+                            current.Ttl == cfg.Ipv6PtrTtl;
+
+                        if (targetCorrect &&
+                            commentCorrect &&
+                            ttlCorrect)
+                        {
+                            Log("  -> PTR already correct.");
+                            alreadyCorrect++;
+                            continue;
+                        }
+
+                        Log("  -> PTR UPDATE required.");
+                        Log($"     current target : {current.PtrName}");
+                        Log($"     desired target : {wanted.TargetName}");
+                        Log($"     current comment: {current.Comments}");
+                        Log($"     desired comment: {wanted.Comment}");
+                        Log($"     current TTL    : {current.Ttl}");
+                        Log($"     desired TTL    : {cfg.Ipv6PtrTtl}");
+
+                        if (cfg.DryRun)
+                        {
+                            Log("     -> TEST MODE: would be updated.");
+                            updated++;
+                        }
+                        else
+                        {
+                            try
+                            {
+                                await UpdateTechnitiumPtrAsync(
+                                    client,
+                                    cfg,
+                                    reverseZone,
+                                    current,
+                                    wanted.TargetName,
+                                    wanted.Comment,
+                                    cancellationToken);
+
+                                updated++;
+                            }
+                            catch (Exception ex)
+                            {
+                                errors++;
+                                Log(
+                                    "     -> PTR update error: " +
+                                    ex.Message);
+                            }
+                        }
+
+                        continue;
+                    }
+
+                    Log(
+                        $"  -> PTR MISSING: {wanted.ReverseName}");
+
+                    if (cfg.DryRun)
+                    {
+                        Log("     -> TEST MODE: would be created.");
+                        added++;
+                    }
+                    else
+                    {
+                        try
+                        {
+                            await AddTechnitiumPtrAsync(
+                                client,
+                                cfg,
+                                reverseZone,
+                                wanted.ReverseName,
+                                wanted.TargetName,
+                                wanted.Comment,
+                                cancellationToken);
+
+                            added++;
+                        }
+                        catch (Exception ex)
+                        {
+                            errors++;
+                            Log(
+                                "     -> PTR add error: " +
+                                ex.Message);
+                        }
+                    }
+                }
+            }
+
+            Log("--------------------------------------------");
+            Log($"PTR checked                  : {checkedCount}");
+            Log($"PTR already correct          : {alreadyCorrect}");
+            Log($"PTR newly created            : {added}");
+            Log($"PTR updated                  : {updated}");
+            Log($"PTR errors                   : {errors}");
+            Log("PTR DELETE is intentionally disabled.");
+        }
+        catch (Exception ex)
+        {
+            Log(
+                "IPv6 PTR synchronization failed: " +
+                ex.GetType().Name +
+                ": " +
+                ex.Message);
+        }
+    }
+
+    private static string CreateIpv6ReverseName(
+        string ipAddress)
+    {
+        if (!IPAddress.TryParse(
+                ipAddress,
+                out IPAddress? address) ||
+            address.AddressFamily !=
+                System.Net.Sockets.AddressFamily.InterNetworkV6)
+            return "";
+
+        string hex =
+            Convert.ToHexString(
+                address.GetAddressBytes())
+            .ToLowerInvariant();
+
+        int prefixNibbles =
+            IsIpv6Ula(ipAddress)
+                ? 14
+                : 16;
+
+        // Technitium expects the record owner relative to the reverse zone.
+        // Example:
+        // 2001:9e8:47b0:8100:b8fc:7dff:feae:37b9
+        // zone  = 0.0.1.8.0.b.7.4.8.e.9.0.1.0.0.2.ip6.arpa
+        // owner = 9.b.7.3.e.a.e.f.f.f.d.7.c.f.8.b
+        return string.Join(
+            ".",
+            hex
+                .Substring(prefixNibbles)
+                .Reverse());
+    }
+
+    private static string CreateIpv6ReverseZone(
+        string ipAddress)
+    {
+        if (!IPAddress.TryParse(
+                ipAddress,
+                out IPAddress? address) ||
+            address.AddressFamily !=
+                System.Net.Sockets.AddressFamily.InterNetworkV6)
+            return "";
+
+        string hex =
+            Convert.ToHexString(
+                address.GetAddressBytes())
+            .ToLowerInvariant();
+
+        int prefixNibbles =
+            IsIpv6Ula(ipAddress)
+                ? 14
+                : 16;
+
+        return string.Join(
+                   ".",
+                   hex
+                       .Substring(0, prefixNibbles)
+                       .Reverse()) +
+               ".ip6.arpa";
+    }
+
+    private static string CreateIpv6ReverseNetworkCidr(
+        string ipAddress)
+    {
+        if (!IPAddress.TryParse(
+                ipAddress,
+                out IPAddress? address) ||
+            address.AddressFamily !=
+                System.Net.Sockets.AddressFamily.InterNetworkV6)
+            return "";
+
+        int prefixLength =
+            IsIpv6Ula(ipAddress)
+                ? 56
+                : 64;
+
+        byte[] bytes =
+            address.GetAddressBytes();
+
+        for (int i = prefixLength / 8;
+             i < bytes.Length;
+             i++)
+        {
+            bytes[i] = 0;
+        }
+
+        return new IPAddress(bytes) +
+               "/" +
+               prefixLength;
+    }
+
+    private async Task<bool> EnsureTechnitiumReverseZoneAsync(
+        HttpClient client,
+        Config cfg,
+        string reverseZone,
+        string networkCidr,
+        CancellationToken cancellationToken)
+    {
+        Log($"PTR: checking zone existence: {reverseZone}");
+
+        string listUrl =
+            $"{cfg.TechnitiumApiUrl.TrimEnd('/')}" +
+            "/api/zones/list";
+
+        using HttpRequestMessage request =
+            new(HttpMethod.Get, listUrl);
+
+        request.Headers.Authorization =
+            new AuthenticationHeaderValue(
+                "Bearer",
+                cfg.TechnitiumApiToken);
+
+        using HttpResponseMessage response =
+            await client.SendAsync(
+                request,
+                cancellationToken);
+
+        string body =
+            await response.Content.ReadAsStringAsync(
+                cancellationToken);
+
+        response.EnsureSuccessStatusCode();
+
+        using JsonDocument doc =
+            JsonDocument.Parse(body);
+
+        if (ZoneExists(
+                doc.RootElement,
+                reverseZone))
+        {
+            Log($"PTR: reverse zone exists: {reverseZone}");
+            return true;
+        }
+
+        Log(
+            $"PTR: reverse zone missing: {reverseZone} " +
+            $"({networkCidr})");
+
+        if (cfg.DryRun)
+        {
+            Log("PTR: TEST MODE - zone would be created.");
+            return true;
+        }
+
+        string createUrl =
+            $"{cfg.TechnitiumApiUrl.TrimEnd('/')}" +
+            "/api/zones/create" +
+            $"?zone={Uri.EscapeDataString(networkCidr)}" +
+            "&type=Primary";
+
+        using HttpRequestMessage createRequest =
+            new(HttpMethod.Get, createUrl);
+
+        createRequest.Headers.Authorization =
+            new AuthenticationHeaderValue(
+                "Bearer",
+                cfg.TechnitiumApiToken);
+
+        using HttpResponseMessage createResponse =
+            await client.SendAsync(
+                createRequest,
+                cancellationToken);
+
+        string createBody =
+            await createResponse.Content.ReadAsStringAsync(
+                cancellationToken);
+
+        createResponse.EnsureSuccessStatusCode();
+
+        EnsureTechnitiumApiOk(
+            createBody,
+            "Technitium reverse zone CREATE");
+
+        Log(
+            $"PTR: reverse zone created: {reverseZone}");
+
+        return true;
+    }
+
+    private static bool ZoneExists(
+        JsonElement root,
+        string zoneName)
+    {
+        if (!root.TryGetProperty(
+                "response",
+                out JsonElement response))
+            return false;
+
+        if (!response.TryGetProperty(
+                "zones",
+                out JsonElement zones) ||
+            zones.ValueKind != JsonValueKind.Array)
+            return false;
+
+        foreach (JsonElement zone in zones.EnumerateArray())
+        {
+            string? name =
+                GetString(zone, "name");
+
+            if (string.Equals(
+                    name?.TrimEnd('.'),
+                    zoneName.TrimEnd('.'),
+                    StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static async Task<TechnitiumPtrRecord?>
+        GetTechnitiumPtrRecordAsync(
+            HttpClient client,
+            Config cfg,
+            string reverseZone,
+            string reverseName,
+            CancellationToken cancellationToken)
+    {
+        string url =
+            $"{cfg.TechnitiumApiUrl.TrimEnd('/')}" +
+            "/api/zones/records/get" +
+            $"?domain={Uri.EscapeDataString(reverseName)}" +
+            $"&zone={Uri.EscapeDataString(reverseZone)}";
+
+        using HttpRequestMessage request =
+            new(HttpMethod.Get, url);
+
+        request.Headers.Authorization =
+            new AuthenticationHeaderValue(
+                "Bearer",
+                cfg.TechnitiumApiToken);
+
+        using HttpResponseMessage response =
+            await client.SendAsync(
+                request,
+                cancellationToken);
+
+        string body =
+            await response.Content.ReadAsStringAsync(
+                cancellationToken);
+
+        response.EnsureSuccessStatusCode();
+
+        using JsonDocument doc =
+            JsonDocument.Parse(body);
+
+        if (!doc.RootElement.TryGetProperty(
+                "response",
+                out JsonElement responseElement) ||
+            !responseElement.TryGetProperty(
+                "records",
+                out JsonElement records))
+        {
+            return null;
+        }
+
+        foreach (JsonElement record in records.EnumerateArray())
+        {
+            if (!string.Equals(
+                    GetString(record, "type"),
+                    "PTR",
+                    StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            string? name =
+                GetString(record, "name");
+
+            if (string.IsNullOrWhiteSpace(name))
+                continue;
+
+            string ptrName = "";
+
+            if (record.TryGetProperty(
+                    "rData",
+                    out JsonElement rData) &&
+                rData.ValueKind == JsonValueKind.Object)
+            {
+                ptrName =
+                    GetString(rData, "ptrName") ?? "";
+            }
+
+            string? comments =
+                GetString(record, "comments");
+
+            int ttl = 0;
+
+            if (record.TryGetProperty(
+                    "ttl",
+                    out JsonElement ttlElement) &&
+                ttlElement.ValueKind == JsonValueKind.Number)
+            {
+                ttlElement.TryGetInt32(out ttl);
+            }
+
+            return new TechnitiumPtrRecord(
+                name.TrimEnd('.'),
+                ptrName.TrimEnd('.'),
+                comments,
+                ttl);
+        }
+
+        return null;
+    }
+
+    private static async Task AddTechnitiumPtrAsync(
+        HttpClient client,
+        Config cfg,
+        string reverseZone,
+        string reverseName,
+        string targetName,
+        string comments,
+        CancellationToken cancellationToken)
+    {
+        string url =
+            $"{cfg.TechnitiumApiUrl.TrimEnd('/')}" +
+            "/api/zones/records/add" +
+            $"?domain={Uri.EscapeDataString(reverseName)}" +
+            $"&zone={Uri.EscapeDataString(reverseZone)}" +
+            "&type=PTR" +
+            $"&ttl={cfg.Ipv6PtrTtl}" +
+            $"&ptrName={Uri.EscapeDataString(targetName)}" +
+            $"&comments={Uri.EscapeDataString(comments)}";
+
+        using HttpRequestMessage request =
+            new(HttpMethod.Get, url);
+
+        request.Headers.Authorization =
+            new AuthenticationHeaderValue(
+                "Bearer",
+                cfg.TechnitiumApiToken);
+
+        using HttpResponseMessage response =
+            await client.SendAsync(
+                request,
+                cancellationToken);
+
+        string body =
+            await response.Content.ReadAsStringAsync(
+                cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new HttpRequestException(
+                $"Technitium PTR ADD API returned " +
+                $"{(int)response.StatusCode} " +
+                $"{response.StatusCode}: {body}");
+        }
+
+        EnsureTechnitiumApiOk(
+            body,
+            "Technitium PTR ADD");
+    }
+
+    private static async Task UpdateTechnitiumPtrAsync(
+        HttpClient client,
+        Config cfg,
+        string reverseZone,
+        TechnitiumPtrRecord existing,
+        string targetName,
+        string comments,
+        CancellationToken cancellationToken)
+    {
+        string url =
+            $"{cfg.TechnitiumApiUrl.TrimEnd('/')}" +
+            "/api/zones/records/update" +
+            $"?domain={Uri.EscapeDataString(existing.Name)}" +
+            $"&zone={Uri.EscapeDataString(reverseZone)}" +
+            "&type=PTR" +
+            $"&ptrName={Uri.EscapeDataString(existing.PtrName)}" +
+            $"&newPtrName={Uri.EscapeDataString(targetName)}" +
+            $"&ttl={cfg.Ipv6PtrTtl}" +
+            $"&comments={Uri.EscapeDataString(comments)}";
+
+        using HttpRequestMessage request =
+            new(HttpMethod.Get, url);
+
+        request.Headers.Authorization =
+            new AuthenticationHeaderValue(
+                "Bearer",
+                cfg.TechnitiumApiToken);
+
+        using HttpResponseMessage response =
+            await client.SendAsync(
+                request,
+                cancellationToken);
+
+        string body =
+            await response.Content.ReadAsStringAsync(
+                cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new HttpRequestException(
+                $"Technitium PTR UPDATE API returned " +
+                $"{(int)response.StatusCode} " +
+                $"{response.StatusCode}: {body}");
+        }
+
+        EnsureTechnitiumApiOk(
+            body,
+            "Technitium PTR UPDATE");
+    }
+
+    private static void EnsureTechnitiumApiOk(
+    string body,
+    string operation)
+{
+    using JsonDocument doc = JsonDocument.Parse(body);
+
+    if (!doc.RootElement.TryGetProperty(
+            "status",
+            out JsonElement statusElement))
+    {
+        throw new InvalidOperationException(
+            $"{operation} error: Technitium API response does not contain a status property.");
+    }
+
+    string status = statusElement.GetString() ?? "";
+
+    if (string.Equals(
+            status,
+            "ok",
+            StringComparison.OrdinalIgnoreCase))
+    {
+        return;
+    }
+
+    string errorMessage = "";
+
+    if (doc.RootElement.TryGetProperty(
+            "errorMessage",
+            out JsonElement errorMessageElement))
+    {
+        errorMessage =
+            errorMessageElement.GetString() ?? "";
+    }
+
+    if (string.IsNullOrWhiteSpace(errorMessage))
+    {
+        errorMessage = $"API returned status '{status}'.";
+    }
+
+    throw new InvalidOperationException(
+        $"{operation} error: {errorMessage}");
 }
 
     private static List<string> GetStableIpv6(
@@ -1052,35 +1727,7 @@ private static bool IsIpv6Ula(string ipAddress)
             $"{response.StatusCode}: {body}");
     }
 
-    using JsonDocument doc =
-        JsonDocument.Parse(body);
-
-    if (doc.RootElement.TryGetProperty(
-            "status",
-            out JsonElement statusElement))
-    {
-        string? status =
-            statusElement.GetString();
-
-        if (!string.Equals(
-                status,
-                "ok",
-                StringComparison.OrdinalIgnoreCase))
-        {
-            string message = "";
-
-            if (doc.RootElement.TryGetProperty(
-                    "message",
-                    out JsonElement messageElement))
-            {
-                message =
-                    messageElement.GetString() ?? "";
-            }
-
-            throw new InvalidOperationException(
-                $"Technitium AAAA ADD Fehler: {message}");
-        }
-    }
+    EnsureTechnitiumApiOk(body,"Technitium AAAA ADD");
 
     Log(
         $"  -> AAAA angelegt: {ipAddress}");
@@ -1129,35 +1776,7 @@ private async Task DeleteTechnitiumAaaaAsync(
             $"{response.StatusCode}: {body}");
     }
 
-    using JsonDocument doc =
-        JsonDocument.Parse(body);
-
-    if (doc.RootElement.TryGetProperty(
-            "status",
-            out JsonElement statusElement))
-    {
-        string? status =
-            statusElement.GetString();
-
-        if (!string.Equals(
-                status,
-                "ok",
-                StringComparison.OrdinalIgnoreCase))
-        {
-            string message = "";
-
-            if (doc.RootElement.TryGetProperty(
-                    "message",
-                    out JsonElement messageElement))
-            {
-                message =
-                    messageElement.GetString() ?? "";
-            }
-
-            throw new InvalidOperationException(
-                $"Technitium AAAA DELETE error: {message}");
-        }
-    }
+    EnsureTechnitiumApiOk(body,"Technitium AAAA DELETE");
 
     Log(
         $"  -> AAAA deleted: {ipAddress}");
@@ -1218,35 +1837,7 @@ private async Task UpdateTechnitiumAaaaAsync(
             $"{response.StatusCode}: {body}");
     }
 
-    using JsonDocument doc =
-        JsonDocument.Parse(body);
-
-    if (doc.RootElement.TryGetProperty(
-            "status",
-            out JsonElement statusElement))
-    {
-        string? status =
-            statusElement.GetString();
-
-        if (!string.Equals(
-                status,
-                "ok",
-                StringComparison.OrdinalIgnoreCase))
-        {
-            string message = "";
-
-            if (doc.RootElement.TryGetProperty(
-                    "message",
-                    out JsonElement messageElement))
-            {
-                message =
-                    messageElement.GetString() ?? "";
-            }
-
-            throw new InvalidOperationException(
-                $"Technitium AAAA UPDATE Error: {message}");
-        }
-    }
+    EnsureTechnitiumApiOk(body,"Technitium AAAA UPDATE");
 
     Log(
         $"  -> AAAA updated: " +
@@ -1475,25 +2066,43 @@ private async Task UpdateTechnitiumAaaaAsync(
     }
 
     private void StopWorker()
-    {
-        lock (_sync)
-        {
-            if (_cts is null)
-                return;
+{
+    Task? worker;
+    CancellationTokenSource? cts;
 
+    lock (_sync)
+    {
+        cts = _cts;
+        worker = _worker;
+
+        _cts = null;
+        _worker = null;
+    }
+
+    if (cts is null)
+        return;
+
+    try
+    {
+        cts.Cancel();
+
+        if (worker is not null &&
+            Task.CurrentId != worker.Id)
+        {
             try
             {
-                _cts.Cancel();
+                worker.GetAwaiter().GetResult();
             }
-            catch
+            catch (OperationCanceledException)
             {
             }
-
-            _cts.Dispose();
-            _cts = null;
-            _worker = null;
         }
     }
+    finally
+    {
+        cts.Dispose();
+    }
+}
 
     private static readonly JsonSerializerOptions JsonOptions =
         new()
@@ -1511,7 +2120,11 @@ private async Task UpdateTechnitiumAaaaAsync(
 
         public bool EnableIpv6Sync { get; set; } = true;
 
+        public bool EnableIpv6PtrSync { get; set; } = true;
+
         public int Ipv6Ttl { get; set; } = 3600;
+
+        public int Ipv6PtrTtl { get; set; } = 3600;
 
         public int IntervalMinutes { get; set; } = 15;
 
@@ -1541,6 +2154,19 @@ private async Task UpdateTechnitiumAaaaAsync(
         string HardwareAddress,
         string Address,
         string HostName);
+
+    private sealed record Ipv6PtrDesired(
+        string IpAddress,
+        string ReverseName,
+        string ReverseZone,
+        string TargetName,
+        string Comment);
+
+    private sealed record TechnitiumPtrRecord(
+        string Name,
+        string PtrName,
+        string? Comments,
+        int Ttl);
 
     private sealed record TechnitiumRecord(
         string Name,
