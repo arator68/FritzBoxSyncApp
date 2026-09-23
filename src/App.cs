@@ -21,6 +21,7 @@ public sealed class App : IDnsApplication
     private CancellationTokenSource? _cts;
     private Task? _worker;
     private Config? _config;
+    private int _configSaveScheduled;
 
     public string Description =>
         "Synchronizes Technitium DHCP reservation hostnames to FRITZ!Box FriendlyNames by MAC address.";
@@ -29,6 +30,10 @@ public sealed class App : IDnsApplication
     IDnsServer dnsServer,
     string? config)
 {
+    // Falls die App durch das Speichern der Konfiguration
+    // erneut initialisiert wird, den bisherigen Worker sauber beenden.
+    StopWorker();
+
     _dnsServer = dnsServer;
 
     if (string.IsNullOrWhiteSpace(config))
@@ -66,22 +71,22 @@ public sealed class App : IDnsApplication
     }
 
     if (configChanged)
-{
-    _ = Task.Run(async () =>
     {
-        try
+        _ = Task.Run(async () =>
         {
-            await Task.Delay(TimeSpan.FromSeconds(15));
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(15));
 
-            await SaveAppConfigAsync();
-        }
-        catch (Exception ex)
-{
-    Log(
-        $"Error saving app configuration: {ex}");
-}
-    });
-}
+                await SaveAppConfigAsync();
+            }
+            catch (Exception ex)
+            {
+                Log(
+                    $"Error saving app configuration: {ex}");
+            }
+        });
+    }
 
     Log("App initialized.");
 
@@ -379,9 +384,9 @@ string appConfig =
             await fritzBox.GetSidAsync(
                 cancellationToken);
 
-        Log("IPv6: FRITZ!Box SID successfully received.");
+        Log("IPv6: FRITZ!Box SID successfully receivedn.");
 
-        Log("IPv6: FRITZ!Box LAN devices are being retrieved..");
+        Log("IPv6: FRITZ!Box LAN devices are being retrieved....");
 
         List<FritzBoxClient.FritzLanDevice> lanDevices =
             await fritzBox.GetLanDevicesAsync(
@@ -834,6 +839,22 @@ string appConfig =
         if (desired.Count == 0)
         {
             Log("PTR: no stable IPv6 addresses available.");
+
+            /*
+            * Keine PTR-Records verändern.
+            *
+            * Bereits als FritzBoxSync verwaltete Reverse-Zonen
+            * dürfen trotzdem geprüft werden.
+            *
+            * Eine Zone wird dabei ausschließlich gelöscht,
+            * wenn sie tatsächlich leer ist.
+            */
+            await CleanupManagedIpv6ReverseZonesAsync(
+                client,
+                cfg,
+                desired,
+                cancellationToken);
+
             return;
         }
 
@@ -843,6 +864,7 @@ string appConfig =
             int alreadyCorrect = 0;
             int added = 0;
             int updated = 0;
+            int deleted = 0;
             int errors = 0;
 
             foreach (var zoneGroup in
@@ -991,13 +1013,120 @@ string appConfig =
                 }
             }
 
+             /*
+             * --------------------------------------------------------
+             * 3. ALTE, VON FRITZBOXSYNC VERWALTETE PTR-RECORDS
+             *
+             * Es werden ausschließlich PTR-Records mit unserem
+             * eindeutigen FritzBoxSync-Kommentar betrachtet.
+             * Manuell angelegte PTR-Records bleiben unangetastet.
+             *
+             * Sicherheitsregel:
+             * Wenn desired leer ist, wurde oben bereits abgebrochen.
+             * Dadurch kann ein leerer FRITZ!Box-IPv6-Status niemals
+             * zu einem Massen-DELETE führen.
+             * --------------------------------------------------------
+             */
+            int deleteCandidates = 0;
+
+            foreach (var zoneGroup in
+                     desired.GroupBy(
+                         x => x.ReverseZone,
+                         StringComparer.OrdinalIgnoreCase))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                string reverseZone = zoneGroup.Key;
+
+                List<Ipv6PtrDesired> zoneDesired =
+                    zoneGroup.ToList();
+
+                HashSet<string> desiredOwners =
+                    zoneDesired
+                        .Select(x => NormalizeReverseName(x.ReverseName))
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                Log(
+                    $"PTR: checking obsolete managed records in {reverseZone}");
+
+                List<TechnitiumPtrRecord> zoneRecords =
+                    await GetTechnitiumPtrRecordsAsync(
+                        client,
+                        cfg,
+                        reverseZone,
+                        cancellationToken);
+
+                foreach (TechnitiumPtrRecord existing in zoneRecords)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    if (string.IsNullOrWhiteSpace(existing.Comments) ||
+                        !existing.Comments.StartsWith(
+                            "FritzBoxSync - FRITZ!Box:",
+                            StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    string owner =
+                        NormalizeReverseName(existing.Name);
+
+                    if (desiredOwners.Contains(owner))
+                    {
+                        continue;
+                    }
+
+                    deleteCandidates++;
+
+                    Log(
+                        "  -> PTR DELETE candidate: obsolete managed PTR");
+                    Log($"     owner   : {existing.Name}");
+                    Log($"     target  : {existing.PtrName}");
+                    Log($"     comment : {existing.Comments}");
+
+                    if (cfg.DryRun)
+                    {
+                        Log("     -> TEST MODE: would be deleted.");
+                        continue;
+                    }
+
+                    try
+                    {
+                        await DeleteTechnitiumPtrAsync(
+                            client,
+                            cfg,
+                            reverseZone,
+                            existing,
+                            cancellationToken);
+
+                        deleted++;
+                    }
+                    catch (Exception ex)
+                    {
+                        errors++;
+
+                        Log(
+                            "     -> PTR delete error: " +
+                            ex.Message);
+                    }
+                }
+            }
+
             Log("--------------------------------------------");
             Log($"PTR checked                  : {checkedCount}");
             Log($"PTR already correct          : {alreadyCorrect}");
             Log($"PTR newly created            : {added}");
             Log($"PTR updated                  : {updated}");
+            Log($"PTR delete candidates        : {deleteCandidates}");
+            Log($"PTR deleted                  : {deleted}");
             Log($"PTR errors                   : {errors}");
-            Log("PTR DELETE is intentionally disabled.");
+            Log("PTR DELETE is enabled with DryRun protection.");
+
+            await CleanupManagedIpv6ReverseZonesAsync(
+                client,
+                cfg,
+                desired,
+                cancellationToken);
         }
         catch (Exception ex)
         {
@@ -1134,17 +1263,95 @@ string appConfig =
         using JsonDocument doc =
             JsonDocument.Parse(body);
 
-        if (ZoneExists(
-                doc.RootElement,
-                reverseZone))
+       if (ZoneExists(
+            doc.RootElement,
+            reverseZone))
         {
             Log($"PTR: reverse zone exists: {reverseZone}");
+
+            /*
+            * Eine bereits vorhandene Reverse-Zone wird nur dann
+            * als FritzBoxSync-Zone übernommen, wenn darin bereits
+            * mindestens ein von FritzBoxSync verwalteter PTR-Record
+            * vorhanden ist.
+            *
+            * Manuelle PTR-Records oder eine leere Zone reichen
+            * ausdrücklich NICHT für eine Übernahme aus.
+            */
+            try
+            {
+                List<TechnitiumPtrRecord> existingRecords =
+                    await GetTechnitiumPtrRecordsAsync(
+                        client,
+                        cfg,
+                        reverseZone,
+                        cancellationToken);
+
+                bool hasManagedPtr =
+                    existingRecords.Any(record =>
+                        !string.IsNullOrWhiteSpace(record.Comments) &&
+                        record.Comments.StartsWith(
+                            "FritzBoxSync - FRITZ!Box:",
+                            StringComparison.Ordinal));
+
+                if (hasManagedPtr)
+                {
+                    Log(
+                        "PTR: existing reverse zone contains " +
+                        "FritzBoxSync PTR records.");
+
+                    if (cfg.DryRun)
+                    {
+                        Log(
+                            "PTR: TEST MODE - existing reverse zone " +
+                            "would be registered as managed.");
+                    }
+                    else if (AddManagedIpv6ReverseZone(
+                                cfg,
+                                reverseZone))
+                    {
+                        Log(
+                            "PTR: existing reverse zone " +
+                            $"registered as managed: {reverseZone}");
+
+                        ScheduleAppConfigSave();
+                    }
+                }
+                else
+                {
+                    Log(
+                        "PTR: existing reverse zone contains " +
+                        "no FritzBoxSync PTR records.");
+
+                    Log(
+                        "PTR: existing reverse zone will NOT " +
+                        "be registered as managed.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log(
+                    "PTR: could not inspect existing reverse zone: " +
+                    ex.Message);
+            }
+
+            return true;
+        }
+        if (cfg.DryRun)
+        {
+            Log("PTR: TEST MODE - zone would be created.");
             return true;
         }
 
-        Log(
-            $"PTR: reverse zone missing: {reverseZone} " +
-            $"({networkCidr})");
+        if (AddManagedIpv6ReverseZone(
+                cfg,
+                reverseZone))
+        {
+            Log(
+                $"PTR: reverse zone registered as managed: {reverseZone}");
+
+            ScheduleAppConfigSave();
+        }
 
         if (cfg.DryRun)
         {
@@ -1215,6 +1422,169 @@ string appConfig =
         }
 
         return false;
+    }
+
+
+    private static string NormalizeReverseName(string name)
+    {
+        return name
+            .Trim()
+            .TrimEnd('.')
+            .ToLowerInvariant();
+    }
+
+    private static async Task<List<TechnitiumPtrRecord>>
+        GetTechnitiumPtrRecordsAsync(
+            HttpClient client,
+            Config cfg,
+            string reverseZone,
+            CancellationToken cancellationToken)
+    {
+        string url =
+            $"{cfg.TechnitiumApiUrl.TrimEnd('/')}" +
+            "/api/zones/records/get" +
+            $"?domain={Uri.EscapeDataString(reverseZone)}" +
+            $"&zone={Uri.EscapeDataString(reverseZone)}" +
+            "&listZone=true";
+
+        using HttpRequestMessage request =
+            new(HttpMethod.Get, url);
+
+        request.Headers.Authorization =
+            new AuthenticationHeaderValue(
+                "Bearer",
+                cfg.TechnitiumApiToken);
+
+        using HttpResponseMessage response =
+            await client.SendAsync(
+                request,
+                cancellationToken);
+
+        string body =
+            await response.Content.ReadAsStringAsync(
+                cancellationToken);
+
+        response.EnsureSuccessStatusCode();
+
+        using JsonDocument doc =
+            JsonDocument.Parse(body);
+
+        if (!doc.RootElement.TryGetProperty(
+                "response",
+                out JsonElement responseElement) ||
+            !responseElement.TryGetProperty(
+                "records",
+                out JsonElement records) ||
+            records.ValueKind != JsonValueKind.Array)
+        {
+            return new List<TechnitiumPtrRecord>();
+        }
+
+        List<TechnitiumPtrRecord> result = new();
+
+        foreach (JsonElement record in records.EnumerateArray())
+        {
+            if (!string.Equals(
+                    GetString(record, "type"),
+                    "PTR",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            string? name =
+                GetString(record, "name");
+
+            if (string.IsNullOrWhiteSpace(name))
+                continue;
+
+            string ptrName = "";
+
+            if (record.TryGetProperty(
+                    "rData",
+                    out JsonElement rData) &&
+                rData.ValueKind == JsonValueKind.Object)
+            {
+                ptrName =
+                    GetString(rData, "ptrName") ?? "";
+            }
+
+            string? comments =
+                GetString(record, "comments");
+
+            int ttl = 0;
+
+            if (record.TryGetProperty(
+                    "ttl",
+                    out JsonElement ttlElement) &&
+                ttlElement.ValueKind == JsonValueKind.Number)
+            {
+                ttlElement.TryGetInt32(out ttl);
+            }
+
+            result.Add(
+                new TechnitiumPtrRecord(
+                    name.TrimEnd('.'),
+                    ptrName.TrimEnd('.'),
+                    comments,
+                    ttl));
+        }
+
+        return result;
+    }
+
+    private async Task DeleteTechnitiumPtrAsync(
+        HttpClient client,
+        Config cfg,
+        string reverseZone,
+        TechnitiumPtrRecord existing,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(existing.PtrName))
+        {
+            throw new InvalidOperationException(
+                "PTR DELETE without a PTR target is not allowed.");
+        }
+
+        string url =
+            $"{cfg.TechnitiumApiUrl.TrimEnd('/')}" +
+            "/api/zones/records/delete" +
+            $"?domain={Uri.EscapeDataString(existing.Name)}" +
+            $"&zone={Uri.EscapeDataString(reverseZone)}" +
+            "&type=PTR" +
+            $"&ptrName={Uri.EscapeDataString(existing.PtrName)}";
+
+        using HttpRequestMessage request =
+            new(HttpMethod.Get, url);
+
+        request.Headers.Authorization =
+            new AuthenticationHeaderValue(
+                "Bearer",
+                cfg.TechnitiumApiToken);
+
+        using HttpResponseMessage response =
+            await client.SendAsync(
+                request,
+                cancellationToken);
+
+        string body =
+            await response.Content.ReadAsStringAsync(
+                cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new HttpRequestException(
+                $"Technitium PTR DELETE API returned " +
+                $"{(int)response.StatusCode} " +
+                $"{response.StatusCode}: {body}");
+        }
+
+        EnsureTechnitiumApiOk(
+            body,
+            "Technitium PTR DELETE");
+
+        Log(
+            $"     -> PTR deleted: {existing.Name} -> {existing.PtrName}");
     }
 
     private static async Task<TechnitiumPtrRecord?>
@@ -1837,7 +2207,35 @@ private async Task UpdateTechnitiumAaaaAsync(
             $"{response.StatusCode}: {body}");
     }
 
-    EnsureTechnitiumApiOk(body,"Technitium AAAA UPDATE");
+    using JsonDocument doc =
+        JsonDocument.Parse(body);
+
+    if (doc.RootElement.TryGetProperty(
+            "status",
+            out JsonElement statusElement))
+    {
+        string? status =
+            statusElement.GetString();
+
+        if (!string.Equals(
+                status,
+                "ok",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            string message = "";
+
+            if (doc.RootElement.TryGetProperty(
+                    "message",
+                    out JsonElement messageElement))
+            {
+                message =
+                    messageElement.GetString() ?? "";
+            }
+
+            throw new InvalidOperationException(
+                $"Technitium AAAA UPDATE Error: {message}");
+        }
+    }
 
     Log(
         $"  -> AAAA updated: " +
@@ -2104,6 +2502,329 @@ private async Task UpdateTechnitiumAaaaAsync(
     }
 }
 
+private static bool IsManagedIpv6ReverseZone(
+    Config cfg,
+    string reverseZone)
+{
+    string normalized =
+        NormalizeReverseName(reverseZone);
+
+    return cfg.ManagedIpv6ReverseZones.Any(
+        x => string.Equals(
+            NormalizeReverseName(x),
+            normalized,
+            StringComparison.OrdinalIgnoreCase));
+}
+
+
+private static bool AddManagedIpv6ReverseZone(
+    Config cfg,
+    string reverseZone)
+{
+    string normalized =
+        NormalizeReverseName(reverseZone);
+
+    if (string.IsNullOrWhiteSpace(normalized))
+        return false;
+
+    if (IsManagedIpv6ReverseZone(
+            cfg,
+            normalized))
+    {
+        return false;
+    }
+
+    cfg.ManagedIpv6ReverseZones.Add(normalized);
+
+    return true;
+}
+
+
+private static bool RemoveManagedIpv6ReverseZone(
+    Config cfg,
+    string reverseZone)
+{
+    string normalized =
+        NormalizeReverseName(reverseZone);
+
+    int removed =
+        cfg.ManagedIpv6ReverseZones.RemoveAll(
+            x => string.Equals(
+                NormalizeReverseName(x),
+                normalized,
+                StringComparison.OrdinalIgnoreCase));
+
+    return removed > 0;
+}
+
+private void ScheduleAppConfigSave()
+{
+    if (Interlocked.Exchange(
+            ref _configSaveScheduled,
+            1) != 0)
+    {
+        return;
+    }
+
+    _ = Task.Run(async () =>
+    {
+        try
+        {
+            await Task.Delay(
+                TimeSpan.FromSeconds(15));
+
+            await SaveAppConfigAsync();
+        }
+        catch (Exception ex)
+        {
+            Log(
+                $"Error saving app configuration: {ex}");
+        }
+        finally
+        {
+            Interlocked.Exchange(
+                ref _configSaveScheduled,
+                0);
+        }
+    });
+}
+
+private async Task<bool> IsTechnitiumReverseZoneEmptyAsync(
+    HttpClient client,
+    Config cfg,
+    string reverseZone,
+    CancellationToken cancellationToken)
+{
+    string url =
+        $"{cfg.TechnitiumApiUrl.TrimEnd('/')}" +
+        "/api/zones/records/get" +
+        $"?domain={Uri.EscapeDataString(reverseZone)}" +
+        $"&zone={Uri.EscapeDataString(reverseZone)}" +
+        "&listZone=true";
+
+    using HttpRequestMessage request =
+        new(HttpMethod.Get, url);
+
+    request.Headers.Authorization =
+        new AuthenticationHeaderValue(
+            "Bearer",
+            cfg.TechnitiumApiToken);
+
+    using HttpResponseMessage response =
+        await client.SendAsync(
+            request,
+            cancellationToken);
+
+    string body =
+        await response.Content.ReadAsStringAsync(
+            cancellationToken);
+
+    response.EnsureSuccessStatusCode();
+
+    using JsonDocument doc =
+        JsonDocument.Parse(body);
+
+    if (!doc.RootElement.TryGetProperty(
+            "response",
+            out JsonElement responseElement) ||
+        !responseElement.TryGetProperty(
+            "records",
+            out JsonElement records) ||
+        records.ValueKind != JsonValueKind.Array)
+    {
+        return true;
+    }
+
+    foreach (JsonElement record
+             in records.EnumerateArray())
+    {
+        string? type =
+            GetString(record, "type");
+
+        if (string.IsNullOrWhiteSpace(type))
+            continue;
+
+        if (string.Equals(
+                type,
+                "SOA",
+                StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(
+                type,
+                "NS",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            continue;
+        }
+
+        return false;
+    }
+
+    return true;
+}
+
+private async Task DeleteTechnitiumReverseZoneAsync(
+    HttpClient client,
+    Config cfg,
+    string reverseZone,
+    CancellationToken cancellationToken)
+{
+    string url =
+        $"{cfg.TechnitiumApiUrl.TrimEnd('/')}" +
+        "/api/zones/delete" +
+        $"?zone={Uri.EscapeDataString(reverseZone)}";
+
+    using HttpRequestMessage request =
+        new(HttpMethod.Get, url);
+
+    request.Headers.Authorization =
+        new AuthenticationHeaderValue(
+            "Bearer",
+            cfg.TechnitiumApiToken);
+
+    using HttpResponseMessage response =
+        await client.SendAsync(
+            request,
+            cancellationToken);
+
+    string body =
+        await response.Content.ReadAsStringAsync(
+            cancellationToken);
+
+    if (!response.IsSuccessStatusCode)
+    {
+        throw new HttpRequestException(
+            $"Technitium reverse zone DELETE API returned " +
+            $"{(int)response.StatusCode} " +
+            $"{response.StatusCode}: {body}");
+    }
+
+    EnsureTechnitiumApiOk(
+        body,
+        "Technitium reverse zone DELETE");
+
+    Log(
+        $"     -> Reverse zone deleted: {reverseZone}");
+}
+
+private async Task CleanupManagedIpv6ReverseZonesAsync(
+    HttpClient client,
+    Config cfg,
+    List<Ipv6PtrDesired> desired,
+    CancellationToken cancellationToken)
+{
+    if (cfg.ManagedIpv6ReverseZones.Count == 0)
+    {
+        Log("PTR: no managed reverse zones registered.");
+        return;
+    }
+
+    HashSet<string> desiredZones =
+        desired
+            .Select(x => NormalizeReverseName(x.ReverseZone))
+            .ToHashSet(
+                StringComparer.OrdinalIgnoreCase);
+
+    List<string> managedZones =
+        cfg.ManagedIpv6ReverseZones
+            .Select(NormalizeReverseName)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    int deleted = 0;
+    int kept = 0;
+
+    foreach (string reverseZone in managedZones)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        /*
+         * Diese Zone wird aktuell noch benötigt.
+         */
+        if (desiredZones.Contains(reverseZone))
+        {
+            continue;
+        }
+
+        Log(
+            $"PTR: obsolete managed reverse zone: {reverseZone}");
+
+        bool empty;
+
+        try
+        {
+            empty =
+                await IsTechnitiumReverseZoneEmptyAsync(
+                    client,
+                    cfg,
+                    reverseZone,
+                    cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            Log(
+                $"     -> Could not inspect zone: {ex.Message}");
+
+            kept++;
+            continue;
+        }
+
+        if (!empty)
+        {
+            Log(
+                "     -> Zone is NOT empty. " +
+                "It will NOT be deleted.");
+
+            kept++;
+            continue;
+        }
+
+        Log(
+            "     -> Zone is empty.");
+
+        if (cfg.DryRun)
+        {
+            Log(
+                "     -> TEST MODE: " +
+                "would delete reverse zone.");
+
+            continue;
+        }
+
+        try
+        {
+            await DeleteTechnitiumReverseZoneAsync(
+                client,
+                cfg,
+                reverseZone,
+                cancellationToken);
+
+            if (RemoveManagedIpv6ReverseZone(
+                    cfg,
+                    reverseZone))
+            {
+                ScheduleAppConfigSave();
+            }
+
+            deleted++;
+        }
+        catch (Exception ex)
+        {
+            Log(
+                $"     -> Reverse zone delete error: " +
+                ex.Message);
+
+            kept++;
+        }
+    }
+
+    Log("--------------------------------------------");
+    Log(
+        $"PTR obsolete zones deleted   : {deleted}");
+    Log(
+        $"PTR obsolete zones kept      : {kept}");
+}
+
     private static readonly JsonSerializerOptions JsonOptions =
         new()
         {
@@ -2121,6 +2842,8 @@ private async Task UpdateTechnitiumAaaaAsync(
         public bool EnableIpv6Sync { get; set; } = true;
 
         public bool EnableIpv6PtrSync { get; set; } = true;
+
+        public List<string> ManagedIpv6ReverseZones { get; set; } = new();
 
         public int Ipv6Ttl { get; set; } = 3600;
 
