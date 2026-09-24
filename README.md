@@ -1,12 +1,7 @@
-**# FritzBoxSync**
-
-
+# FritzBoxSync**
 
 FritzBoxSync is a Technitium DNS Server application that automatically synchronizes device hostnames from Technitium DHCP with the corresponding Friendly Names on a FRITZ!Box.
-
-
-
-**## FritzBoxSync v1.0.2
+## FritzBoxSync v1.0.2
 
 ### Added
 
@@ -29,8 +24,6 @@ FritzBoxSync is a Technitium DNS Server application that automatically synchroni
 - Reverse zones are deleted only when no other records remain
 
 ## Features**
-
-
 
 - Reads reserved DHCP leases from Technitium DNS Server.
 
@@ -58,12 +51,7 @@ FritzBoxSync is a Technitium DNS Server application that automatically synchroni
 - Runs directly as a Technitium DNS Server application.
 
 - No external service is required.
-
-
-
-**## Download**
-
-
+## Download**
 
 Download the latest release from the GitHub Releases page:
 
@@ -82,12 +70,7 @@ The release contains a ready-to-install ZIP package for Technitium DNS Server.
 >
 
 > Download the `FritzBoxSyncApp-*.zip` release asset instead.
-
-
-
-**## How It Works**
-
-
+## How It Works**
 
 The synchronization process is based on the device MAC address:
 
@@ -170,12 +153,7 @@ Desktop-PC.example.local
 
 
 The Technitium DHCP reservation hostname is used as the source name.
-
-
-
-**## Requirements**
-
-
+## Requirements**
 
 - Technitium DNS Server 15.5.0
 
@@ -188,12 +166,7 @@ The Technitium DHCP reservation hostname is used as the source name.
 - Network connectivity between the Technitium DNS Server and the FRITZ!Box
 
 - A .NET runtime compatible with the installed Technitium DNS Server application version
-
-
-
-**## Installation**
-
-
+## Installation**
 
 FritzBoxSync is installed through the Technitium DNS Server web interface.
 
@@ -220,12 +193,7 @@ FritzBoxSync is installed through the Technitium DNS Server web interface.
 
 
 No manual extraction into the Technitium application directory is required.
-
-
-
-**## Configuration**
-
-
+## Configuration**
 
 The application can be configured through the Technitium DNS Server application settings.
 
@@ -266,10 +234,7 @@ Example:
   "technitiumApiToken": "YOUR_API_TOKEN"
 }
 ```
-
-
-
-**### Configuration Options
+### Configuration Options
 
 | Option | Description |
 | --- | --- |
@@ -296,8 +261,6 @@ The `managedIpv6ReverseZones` list is maintained automatically by FritzBoxSync a
 When a required reverse zone does not exist, FritzBoxSync creates it and registers it as managed. Existing reverse zones containing FritzBoxSync-managed PTR records can also be recognized as managed.
 
 ## Dry-Run Mode**
-
-
 
 For initial testing, set:
 
@@ -328,12 +291,7 @@ Once the configuration has been verified, set:
 
 
 The application will apply detected changes to the FRITZ!Box.
-
-
-
-**## Synchronization**
-
-
+## Synchronization**
 
 FritzBoxSync can synchronize automatically:
 
@@ -360,12 +318,7 @@ For example:
 
 
 causes a synchronization at application startup and then every 15 minutes.
-
-
-
-**## Logging**
-
-
+## Logging**
 
 FritzBoxSync writes its messages to the Technitium DNS Server log using the prefix:
 
@@ -418,20 +371,10 @@ The IPv6 synchronization summary reports information such as:
 - number of outdated AAAA records deleted
 
 - number of synchronization errors
-
-
-
-**## Current Scope**
-
-
+## Current Scope**
 
 FritzBoxSync synchronizes devices managed through Technitium DHCP reservations.
-
-
-
-**### IPv4 Synchronization**
-
-
+### IPv4 Synchronization**
 
 For IPv4 synchronization:
 
@@ -442,12 +385,7 @@ For IPv4 synchronization:
 - Devices are matched with FRITZ!Box devices using their MAC addresses.
 
 - The Technitium hostname is synchronized to the FRITZ!Box Friendly Name.
-
-
-
-**### IPv6 Synchronization**
-
-
+### IPv6 Synchronization**
 
 FritzBoxSync also synchronizes stable IPv6 addresses for devices that are found in both Technitium DHCP reservations and the FRITZ!Box LAN device list.
 
@@ -521,12 +459,7 @@ When the prefix changes, FritzBoxSync automatically:
 8. Removes the obsolete zone from the managed reverse-zone list.
 
 Reverse zones containing other records are kept.
-
-
-
-**## Security**
-
-
+## Security**
 
 Do not publish or commit the following values:
 
@@ -543,12 +476,7 @@ Use a dedicated FRITZ!Box user for the synchronization application where possibl
 
 
 The release package contains configuration placeholders and does not contain the developer's personal credentials or API token.
-
-
-
-**## Updating**
-
-
+## Updating**
 
 To update FritzBoxSync:
 
@@ -565,12 +493,7 @@ To update FritzBoxSync:
 5. Verify the application configuration after the update.
 
 6. Restart the application if required.
-
-
-
-**## Building from Source**
-
-
+## Building from Source**
 
 This section is intended for developers who want to build FritzBoxSync themselves.
 
@@ -639,12 +562,7 @@ dnsApp.config
 
 
 The repository also contains a Visual Studio Code build task that can be used to build the required dependencies and FritzBoxSync together.
-
-
-
-**## Development**
-
-
+## Development**
 
 The project uses:
 
@@ -679,12 +597,7 @@ v1.0.0
 
 
 triggers the release build.
-
-
-
-**## License**
-
-
+## License**
 
 FritzBoxSync is licensed under the MIT License.
 
