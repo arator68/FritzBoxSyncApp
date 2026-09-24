@@ -2,21 +2,24 @@
   "enabled": true,
   "dryRun": true,
   "runOnStartup": true,
+
+  "enableIpv6Sync": true,
+  "enableIpv6PtrSync": true,
+  "managedIpv6ReverseZones": [],
+
+  "ipv6Ttl": 3600,
+  "ipv6PtrTtl": 3600,
+
   "intervalMinutes": 15,
 
   "fritzBoxUrl": "http://YOUR_FRITZBOX_IP:49000",
   "fritzBoxHttpsUrl": "https://YOUR_FRITZBOX_IP:49443",
   "fritzBoxWebUrl": "http://YOUR_FRITZBOX_IP",
-  "fritzUsername": "YOUR_FRITZBOX_USERNAME",
-  "fritzPassword": "YOUR_FRITZBOX_PASSWORD",
+
+  "fritzUsername": "YOUR_FRITZ_USERNAME",
+  "fritzPassword": "YOUR_FRITZ_PASSWORD",
 
   "technitiumApiUrl": "http://YOUR_TECHNITIUM_IP:5380",
-  "technitiumApiToken": "YOUR_TECHNITIUM_API_TOKEN",
-
-  "EnableIpv6Sync": true,
-  "EnableIpv6PtrSync": true,
-  "Ipv6Ttl": 3600,
-  "Ipv6PtrTtl": 3600,
-  "TechnitiumDnsZone": "YOUR DOMAIN",
-  "ManagedIpv6ReverseZones": []
+  "technitiumDnsZone": "YOUR_DNS_ZONE",
+  "technitiumApiToken": "YOUR_API_TOKEN"
 }
