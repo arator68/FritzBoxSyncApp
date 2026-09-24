@@ -80,20 +80,29 @@ The configuration is stored in `dnsApp.config`.
 Example:
 ```json
 {
-  "enabled": true,
-  "dryRun": false,
-  "runOnStartup": true,
-  "enableIpv6Sync": true,
-  "ipv6Ttl": 3600,
-  "intervalMinutes": 15,
-  "fritzBoxUrl": "http://192.168.178.1:49000",
-  "fritzBoxHttpsUrl": "https://192.168.178.1:49443",
-  "fritzBoxWebUrl": "http://192.168.178.1",
-  "fritzUsername": "TechnitiumSync",
-  "fritzPassword": "YOUR_PASSWORD",
-  "technitiumApiUrl": "http://192.168.178.2:5380",
-  "technitiumDnsZone": "koch.local",
-  "technitiumApiToken": "YOUR_API_TOKEN"
+  "enabled": true,
+  "dryRun": true,
+  "runOnStartup": true,
+
+  "enableIpv6Sync": true,
+  "enableIpv6PtrSync": true,
+  "managedIpv6ReverseZones": [],
+
+  "ipv6Ttl": 3600,
+  "ipv6PtrTtl": 3600,
+
+  "intervalMinutes": 15,
+
+  "fritzBoxUrl": "http://YOUR_FRITZBOX_IP:49000",
+  "fritzBoxHttpsUrl": "https://YOUR_FRITZBOX_IP:49443",
+  "fritzBoxWebUrl": "http://YOUR_FRITZBOX_IP",
+
+  "fritzUsername": "YOUR_FRITZ_USERNAME",
+  "fritzPassword": "YOUR_FRITZ_PASSWORD",
+
+  "technitiumApiUrl": "http://YOUR_TECHNITIUM_IP:5380",
+  "technitiumDnsZone": "YOUR_DNS_ZONE",
+  "technitiumApiToken": "YOUR_API_TOKEN"
 }
 ```
 ### Configuration Options
