@@ -2180,97 +2180,248 @@ public sealed class App : IDnsApplication
     }
 
     private async Task CleanupManagedIpv6ReverseZonesAsync(
-        HttpClient client,
-        Config cfg,
-        List<Ipv6PtrDesired> desired,
-        CancellationToken cancellationToken
-    )
+    HttpClient client,
+    Config cfg,
+    List<Ipv6PtrDesired> desired,
+    CancellationToken cancellationToken)
+{
+    if (cfg.ManagedIpv6ReverseZones.Count == 0)
     {
-        if (cfg.ManagedIpv6ReverseZones.Count == 0)
-        {
-            Log("PTR: no managed reverse zones registered.");
-            return;
-        }
+        Log("PTR: no managed reverse zones registered.");
+        return;
+    }
 
-        HashSet<string> desiredZones = desired
+    HashSet<string> desiredZones =
+        desired
             .Select(x => NormalizeReverseName(x.ReverseZone))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        List<string> managedZones = cfg
-            .ManagedIpv6ReverseZones.Select(NormalizeReverseName)
+    List<string> managedZones =
+        cfg.ManagedIpv6ReverseZones
+            .Select(NormalizeReverseName)
             .Where(x => !string.IsNullOrWhiteSpace(x))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        int deleted = 0;
-        int kept = 0;
+    int deletedZones = 0;
+    int keptZones = 0;
+    int deletedPtrs = 0;
+    int ptrErrors = 0;
 
-        foreach (string reverseZone in managedZones)
+    foreach (string reverseZone in managedZones)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        /*
+         * ------------------------------------------------------------
+         * Zone wird aktuell noch benötigt.
+         * ------------------------------------------------------------
+         */
+        if (desiredZones.Contains(reverseZone))
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            /*
-             * Diese Zone wird aktuell noch benötigt.
-             */
-            if (desiredZones.Contains(reverseZone))
-            {
-                continue;
-            }
-
-            bool empty;
-
-            try
-            {
-                empty = await IsTechnitiumReverseZoneEmptyAsync(
-                    client,
-                    cfg,
-                    reverseZone,
-                    cancellationToken
-                );
-            }
-            catch (Exception ex)
-            {
-                Log($"     -> Could not inspect zone: {ex.Message}");
-
-                kept++;
-                continue;
-            }
-
-            if (!empty)
-            {
-                kept++;
-                continue;
-            }
-
-            if (cfg.DryRun)
-            {
-                Log($"PTR ZONE DELETE (DRY RUN): {reverseZone}");
-                continue;
-            }
-
-            try
-            {
-                await DeleteTechnitiumReverseZoneAsync(client, cfg, reverseZone, cancellationToken);
-
-                if (RemoveManagedIpv6ReverseZone(cfg, reverseZone))
-                {
-                    ScheduleAppConfigSave();
-                }
-
-                deleted++;
-            }
-            catch (Exception ex)
-            {
-                Log($"     -> Reverse zone delete error: " + ex.Message);
-
-                kept++;
-            }
+            continue;
         }
 
         Log("--------------------------------------------");
-        Log($"PTR obsolete zones deleted    : {deleted}");
-        Log($"PTR obsolete zones kept       : {kept}");
+        Log($"PTR: obsolete managed reverse zone: {reverseZone}");
+
+        /*
+         * ------------------------------------------------------------
+         * 1. Alle PTRs der alten Zone holen
+         * ------------------------------------------------------------
+         */
+        List<TechnitiumPtrRecord> zoneRecords;
+
+        try
+        {
+            zoneRecords =
+                await GetTechnitiumPtrRecordsAsync(
+                    client,
+                    cfg,
+                    reverseZone,
+                    cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            Log(
+                $"     -> Could not read PTR records: {ex.Message}");
+
+            keptZones++;
+            continue;
+        }
+
+        /*
+         * ------------------------------------------------------------
+         * 2. Ausschließlich von FritzBoxSync verwaltete PTRs löschen
+         * ------------------------------------------------------------
+         */
+        int managedPtrsInZone = 0;
+
+        foreach (TechnitiumPtrRecord existing in zoneRecords)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (string.IsNullOrWhiteSpace(existing.Comments))
+            {
+                continue;
+            }
+
+            if (!existing.Comments.StartsWith(
+                    "FritzBoxSync - FRITZ!Box:",
+                    StringComparison.Ordinal))
+            {
+                /*
+                 * Fremder/manuell angelegter PTR.
+                 * NICHT löschen.
+                 */
+                continue;
+            }
+
+            managedPtrsInZone++;
+
+            Log("  -> obsolete managed PTR found:");
+            Log($"     owner   : {existing.Name}");
+            Log($"     target  : {existing.PtrName}");
+            Log($"     comment : {existing.Comments}");
+
+            if (cfg.DryRun)
+            {
+                Log("     -> TEST MODE: would be deleted.");
+                continue;
+            }
+
+            try
+            {
+                await DeleteTechnitiumPtrAsync(
+                    client,
+                    cfg,
+                    reverseZone,
+                    existing,
+                    cancellationToken);
+
+                deletedPtrs++;
+            }
+            catch (Exception ex)
+            {
+                ptrErrors++;
+
+                Log(
+                    $"     -> PTR delete error: {ex.Message}");
+            }
+        }
+
+        /*
+         * ------------------------------------------------------------
+         * 3. TEST MODE
+         *
+         * Keine echten Änderungen durchführen.
+         * Die Zone bleibt deshalb bewusst bestehen.
+         * ------------------------------------------------------------
+         */
+        if (cfg.DryRun)
+        {
+            if (managedPtrsInZone > 0)
+            {
+                Log(
+                    $"     -> TEST MODE: {managedPtrsInZone} " +
+                    "managed PTR(s) would be removed.");
+
+                Log(
+                    "     -> TEST MODE: reverse zone would then " +
+                    "be checked for deletion.");
+            }
+            else
+            {
+                Log(
+                    "     -> TEST MODE: no managed PTRs found.");
+
+                Log(
+                    "     -> TEST MODE: reverse zone would be " +
+                    "checked for deletion.");
+            }
+
+            keptZones++;
+            continue;
+        }
+
+        /*
+         * ------------------------------------------------------------
+         * 4. Nach dem Löschen prüfen:
+         *
+         * Sind jetzt nur noch SOA/NS vorhanden?
+         * ------------------------------------------------------------
+         */
+        bool empty;
+
+        try
+        {
+            empty =
+                await IsTechnitiumReverseZoneEmptyAsync(
+                    client,
+                    cfg,
+                    reverseZone,
+                    cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            Log(
+                $"     -> Could not inspect zone after PTR cleanup: " +
+                ex.Message);
+
+            keptZones++;
+            continue;
+        }
+
+        if (!empty)
+        {
+            Log(
+                "     -> Zone still contains other records. " +
+                "It will NOT be deleted.");
+
+            keptZones++;
+            continue;
+        }
+
+        Log(
+            "     -> Zone is empty after managed PTR cleanup.");
+
+        /*
+         * ------------------------------------------------------------
+         * 5. Alte Reverse-Zone löschen
+         * ------------------------------------------------------------
+         */
+        try
+        {
+            await DeleteTechnitiumReverseZoneAsync(
+                client,
+                cfg,
+                reverseZone,
+                cancellationToken);
+
+            if (RemoveManagedIpv6ReverseZone(
+                    cfg,
+                    reverseZone))
+            {
+                ScheduleAppConfigSave();
+            }
+
+            deletedZones++;
+        }
+        catch (Exception ex)
+        {
+            Log(
+                $"     -> Reverse zone delete error: {ex.Message}");
+
+            keptZones++;
+        }
     }
+
+    Log("--------------------------------------------");
+    Log($"PTR obsolete records deleted : {deletedPtrs}");
+    Log($"PTR delete errors             : {ptrErrors}");
+    Log($"PTR obsolete zones deleted    : {deletedZones}");
+    Log($"PTR obsolete zones kept       : {keptZones}");
+}
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
