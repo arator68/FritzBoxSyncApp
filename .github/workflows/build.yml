@@ -59,11 +59,9 @@ jobs:
           # directory levels above src. Link the complete dependency
           # repositories there so all of their internal project references
           # remain available as well.
-          ln -sfn "$GITHUB_WORKSPACE/_deps/DnsServer" \
-            "$GITHUB_WORKSPACE/../DnsServer"
+          ln -sfn "$GITHUB_WORKSPACE/_deps/DnsServer"             "$GITHUB_WORKSPACE/../DnsServer"
 
-          ln -sfn "$GITHUB_WORKSPACE/_deps/TechnitiumLibrary" \
-            "$GITHUB_WORKSPACE/../TechnitiumLibrary"
+          ln -sfn "$GITHUB_WORKSPACE/_deps/TechnitiumLibrary"             "$GITHUB_WORKSPACE/../TechnitiumLibrary"
 
       - name: Show build layout
         shell: bash
@@ -87,6 +85,9 @@ jobs:
 
       - name: Build FritzBoxSync
         run: dotnet build ./src/FritzBoxSyncApp.csproj -c Release --no-restore
+
+      - name: Build IPv6 test project
+        run: dotnet build ./tests/FritzBoxIpv6Test/FritzBoxIpv6Test.csproj -c Release
 
       - name: Determine package version
         shell: bash
@@ -144,7 +145,4 @@ jobs:
         run: |
           set -euo pipefail
 
-          gh release create "$GITHUB_REF_NAME" \
-            "$GITHUB_WORKSPACE/$PACKAGE_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes
+          gh release create "$GITHUB_REF_NAME"             "$GITHUB_WORKSPACE/$PACKAGE_NAME"             --title "$GITHUB_REF_NAME"             --generate-notes
