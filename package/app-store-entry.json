@@ -1,0 +1,7 @@
+{
+  "name": "FritzBoxSync",
+  "version": "1.0.3",
+  "description": "Synchronizes device hostnames from Technitium DHCP with FRITZ!Box Friendly Names. Supports IPv6 AAAA and PTR synchronization for stable GUA and ULA addresses, automatic IPv6 reverse-zone management, prefix changes, and protection of foreign/manual PTR records.",
+  "url": "https://github.com/arator68/FritzBoxSyncApp/releases/download/v1.0.3/FritzBoxSyncApp-1.0.3.zip",
+  "size": "38.21 KB"
+}
