@@ -339,16 +339,12 @@ public sealed class App : IDnsApplication
 
         try
         {
-    
             string sid = await fritzBox.GetSidAsync(cancellationToken);
-
-
 
             List<FritzBoxClient.FritzLanDevice> lanDevices = await fritzBox.GetLanDevicesAsync(
                 sid,
                 cancellationToken
             );
-
 
             Dictionary<string, FritzBoxClient.FritzLanDevice> lanDevicesByMac = lanDevices
                 .Where(x => !string.IsNullOrWhiteSpace(x.Mac))
@@ -357,13 +353,11 @@ public sealed class App : IDnsApplication
 
             using HttpClient techClient = CreateHttpClient();
 
-
             List<TechnitiumRecord> records = await GetTechnitiumRecordsAsync(
                 techClient,
                 cfg,
                 cancellationToken
             );
-
 
             int stableDevices = 0;
             int alreadyPresent = 0;
@@ -388,15 +382,16 @@ public sealed class App : IDnsApplication
                 }
 
                 List<string> desiredIpv6 = GetStableIpv6(device);
+                List<string> desiredPtrIpv6 = GetIpv6ForPtr(device);
 
                 if (desiredIpv6.Count == 0)
                 {
                     noStableIpv6++;
-
-                    continue;
                 }
-
-                stableDevices++;
+                else
+                {
+                    stableDevices++;
+                }
 
                 string dnsName = NormalizeDnsName(lease.HostName, cfg.TechnitiumDnsZone);
 
@@ -407,7 +402,7 @@ public sealed class App : IDnsApplication
                     desiredComment = desiredComment.Substring(0, 255);
                 }
 
-                foreach (string ip in desiredIpv6)
+                foreach (string ip in desiredPtrIpv6)
                 {
                     string reverseName = CreateIpv6ReverseName(ip);
                     string reverseZone = CreateIpv6ReverseZone(ip);
@@ -431,225 +426,230 @@ public sealed class App : IDnsApplication
                     }
                 }
 
-                /*
-                 * --------------------------------------------------------
-                 * EXISTIERENDE AAAA-RECORDS DIESES HOSTNAMENS
-                 * --------------------------------------------------------
-                 */
-
-                List<TechnitiumRecord> existingRecords = records
-                    .Where(x =>
-                        string.Equals(x.Type, "AAAA", StringComparison.OrdinalIgnoreCase)
-                        && string.Equals(
-                            NormalizeDnsName(x.Name, cfg.TechnitiumDnsZone),
-                            dnsName,
-                            StringComparison.OrdinalIgnoreCase
-                        )
-                        && !string.IsNullOrWhiteSpace(x.IpAddress)
-                    )
-                    .ToList();
-
-                /*
-                 * --------------------------------------------------------
-                 * FRITZ!BOX = SOLL
-                 * TECHNITIUM = IST
-                 * --------------------------------------------------------
-                 */
-
-                HashSet<string> desiredSet = desiredIpv6
-                    .Select(NormalizeIpv6)
-                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-                HashSet<string> existingSet = existingRecords
-                    .Select(x => NormalizeIpv6(x.IpAddress!))
-                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-                /*
-                 * --------------------------------------------------------
-                 * 1. NEUE IPv6-ADRESSEN
-                 * --------------------------------------------------------
-                 */
-
-                foreach (string desiredIp in desiredSet)
+                if (desiredIpv6.Count > 0)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-
-                    aaaaChecked++;
-
-                    if (existingSet.Contains(desiredIp))
-                    {
-                        TechnitiumRecord existing = existingRecords.First(x =>
-                            string.Equals(
-                                NormalizeIpv6(x.IpAddress!),
-                                desiredIp,
-                                StringComparison.OrdinalIgnoreCase
-                            )
-                        );
-
-                        bool commentCorrect = string.Equals(
-                            existing.Comments,
-                            desiredComment,
-                            StringComparison.Ordinal
-                        );
-
-                        bool ttlCorrect = existing.Ttl == cfg.Ipv6Ttl;
-
-                        if (!commentCorrect || !ttlCorrect)
-                        {
-                            if (cfg.DryRun)
-                            {
-                                Log($"AAAA UPDATE (DRY RUN): {dnsName} | {desiredIp}");
-
-                                updated++;
-                            }
-                            else
-                            {
-                                try
-                                {
-                                    await UpdateTechnitiumAaaaAsync(
-                                        techClient,
-                                        cfg,
-                                        dnsName,
-                                        existing,
-                                        desiredIp,
-                                        desiredComment,
-                                        cancellationToken
-                                    );
-
-                                    int index = records.IndexOf(existing);
-
-                                    if (index >= 0)
-                                    {
-                                        records[index] = existing with
-                                        {
-                                            IpAddress = desiredIp,
-                                            Comments = desiredComment,
-                                            Ttl = cfg.Ipv6Ttl,
-                                        };
-                                    }
-
-                                    updated++;
-
-                                    Log($"AAAA UPDATE: {dnsName} | {existing.IpAddress} -> {desiredIp}");
-                                }
-                                catch (Exception ex)
-                                {
-                                    errors++;
-
-                                    Log("     -> Error during update: " + ex.Message);
-                                }
-                            }
-                        }
-                        else
-                        {
-                            alreadyPresent++;
-                        }
-
-                        continue;
-                    }
-
                     /*
-                     * IPv6 fehlt in Technitium
+                     * --------------------------------------------------------
+                     * EXISTIERENDE AAAA-RECORDS DIESES HOSTNAMENS
+                     * --------------------------------------------------------
                      */
 
-                    if (cfg.DryRun)
-                    {
-                        Log($"AAAA ADD (DRY RUN): {dnsName} | {desiredIp}");
-
-                        added++;
-                    }
-                    else
-                    {
-                        try
-                        {
-                            await AddTechnitiumAaaaAsync(
-                                techClient,
-                                cfg,
+                    List<TechnitiumRecord> existingRecords = records
+                        .Where(x =>
+                            string.Equals(x.Type, "AAAA", StringComparison.OrdinalIgnoreCase)
+                            && string.Equals(
+                                NormalizeDnsName(x.Name, cfg.TechnitiumDnsZone),
                                 dnsName,
-                                desiredIp,
-                                desiredComment,
-                                cancellationToken
-                            );
+                                StringComparison.OrdinalIgnoreCase
+                            )
+                            && !string.IsNullOrWhiteSpace(x.IpAddress)
+                        )
+                        .ToList();
 
-                            records.Add(
-                                new TechnitiumRecord(
-                                    dnsName,
-                                    "AAAA",
+                    /*
+                     * --------------------------------------------------------
+                     * FRITZ!BOX = SOLL
+                     * TECHNITIUM = IST
+                     * --------------------------------------------------------
+                     */
+
+                    HashSet<string> desiredSet = desiredIpv6
+                        .Select(NormalizeIpv6)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                    HashSet<string> existingSet = existingRecords
+                        .Select(x => NormalizeIpv6(x.IpAddress!))
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                    /*
+                     * --------------------------------------------------------
+                     * 1. NEUE IPv6-ADRESSEN
+                     * --------------------------------------------------------
+                     */
+
+                    foreach (string desiredIp in desiredSet)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+
+                        aaaaChecked++;
+
+                        if (existingSet.Contains(desiredIp))
+                        {
+                            TechnitiumRecord existing = existingRecords.First(x =>
+                                string.Equals(
+                                    NormalizeIpv6(x.IpAddress!),
                                     desiredIp,
-                                    desiredComment,
-                                    cfg.Ipv6Ttl
+                                    StringComparison.OrdinalIgnoreCase
                                 )
                             );
 
-                            added++;
-
-                            Log($"AAAA ADD: {dnsName} | {desiredIp}");
-                        }
-                        catch (Exception ex)
-                        {
-                            errors++;
-
-                            Log($"AAAA ADD ERROR: {dnsName} | {desiredIp} | {ex.Message}");
-                        }
-                    }
-                }
-
-                /*
-                 * --------------------------------------------------------
-                 * 2. ALTE IPv6-ADRESSEN LÖSCHEN
-                 *
-                 * Alles was in Technitium vorhanden ist,
-                 * aber von der FRITZ!Box nicht mehr geliefert wird.
-                 * --------------------------------------------------------
-                 */
-
-                foreach (TechnitiumRecord existing in existingRecords)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-
-                    if (string.IsNullOrWhiteSpace(existing.IpAddress))
-                    {
-                        continue;
-                    }
-
-                    aaaaChecked++;
-
-                    string existingIp = NormalizeIpv6(existing.IpAddress);
-
-                    if (desiredSet.Contains(existingIp))
-                    {
-                        continue;
-                    }
-
-                    if (cfg.DryRun)
-                    {
-                        Log($"AAAA DELETE (DRY RUN): {dnsName} | {existingIp}");
-
-                        deleted++;
-                    }
-                    else
-                    {
-                        try
-                        {
-                            await DeleteTechnitiumAaaaAsync(
-                                techClient,
-                                cfg,
-                                dnsName,
-                                existingIp,
-                                cancellationToken
+                            bool commentCorrect = string.Equals(
+                                existing.Comments,
+                                desiredComment,
+                                StringComparison.Ordinal
                             );
 
-                            records.Remove(existing);
+                            bool ttlCorrect = existing.Ttl == cfg.Ipv6Ttl;
+
+                            if (!commentCorrect || !ttlCorrect)
+                            {
+                                if (cfg.DryRun)
+                                {
+                                    Log($"AAAA UPDATE (DRY RUN): {dnsName} | {desiredIp}");
+
+                                    updated++;
+                                }
+                                else
+                                {
+                                    try
+                                    {
+                                        await UpdateTechnitiumAaaaAsync(
+                                            techClient,
+                                            cfg,
+                                            dnsName,
+                                            existing,
+                                            desiredIp,
+                                            desiredComment,
+                                            cancellationToken
+                                        );
+
+                                        int index = records.IndexOf(existing);
+
+                                        if (index >= 0)
+                                        {
+                                            records[index] = existing with
+                                            {
+                                                IpAddress = desiredIp,
+                                                Comments = desiredComment,
+                                                Ttl = cfg.Ipv6Ttl,
+                                            };
+                                        }
+
+                                        updated++;
+
+                                        Log(
+                                            $"AAAA UPDATE: {dnsName} | {existing.IpAddress} -> {desiredIp}"
+                                        );
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        errors++;
+
+                                        Log("     -> Error during update: " + ex.Message);
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                alreadyPresent++;
+                            }
+
+                            continue;
+                        }
+
+                        /*
+                         * IPv6 fehlt in Technitium
+                         */
+
+                        if (cfg.DryRun)
+                        {
+                            Log($"AAAA ADD (DRY RUN): {dnsName} | {desiredIp}");
+
+                            added++;
+                        }
+                        else
+                        {
+                            try
+                            {
+                                await AddTechnitiumAaaaAsync(
+                                    techClient,
+                                    cfg,
+                                    dnsName,
+                                    desiredIp,
+                                    desiredComment,
+                                    cancellationToken
+                                );
+
+                                records.Add(
+                                    new TechnitiumRecord(
+                                        dnsName,
+                                        "AAAA",
+                                        desiredIp,
+                                        desiredComment,
+                                        cfg.Ipv6Ttl
+                                    )
+                                );
+
+                                added++;
+
+                                Log($"AAAA ADD: {dnsName} | {desiredIp}");
+                            }
+                            catch (Exception ex)
+                            {
+                                errors++;
+
+                                Log($"AAAA ADD ERROR: {dnsName} | {desiredIp} | {ex.Message}");
+                            }
+                        }
+                    }
+
+                    /*
+                     * --------------------------------------------------------
+                     * 2. ALTE IPv6-ADRESSEN LÖSCHEN
+                     *
+                     * Alles was in Technitium vorhanden ist,
+                     * aber von der FRITZ!Box nicht mehr geliefert wird.
+                     * --------------------------------------------------------
+                     */
+
+                    foreach (TechnitiumRecord existing in existingRecords)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+
+                        if (string.IsNullOrWhiteSpace(existing.IpAddress))
+                        {
+                            continue;
+                        }
+
+                        aaaaChecked++;
+
+                        string existingIp = NormalizeIpv6(existing.IpAddress);
+
+                        if (desiredSet.Contains(existingIp))
+                        {
+                            continue;
+                        }
+
+                        if (cfg.DryRun)
+                        {
+                            Log($"AAAA DELETE (DRY RUN): {dnsName} | {existingIp}");
 
                             deleted++;
-
-                            Log($"AAAA DELETE: {dnsName} | {existingIp}");
                         }
-                        catch (Exception ex)
+                        else
                         {
-                            errors++;
+                            try
+                            {
+                                await DeleteTechnitiumAaaaAsync(
+                                    techClient,
+                                    cfg,
+                                    dnsName,
+                                    existingIp,
+                                    cancellationToken
+                                );
 
-                            Log($"AAAA DELETE ERROR: {dnsName} | {existingIp} | {ex.Message}");
+                                records.Remove(existing);
+
+                                deleted++;
+
+                                Log($"AAAA DELETE: {dnsName} | {existingIp}");
+                            }
+                            catch (Exception ex)
+                            {
+                                errors++;
+
+                                Log($"AAAA DELETE ERROR: {dnsName} | {existingIp} | {ex.Message}");
+                            }
                         }
                     }
                 }
@@ -790,7 +790,9 @@ public sealed class App : IDnsApplication
 
                         if (cfg.DryRun)
                         {
-                            Log($"PTR UPDATE (DRY RUN): {wanted.TargetName} | {current.PtrName} -> {wanted.TargetName}");
+                            Log(
+                                $"PTR UPDATE (DRY RUN): {wanted.TargetName} | {current.PtrName} -> {wanted.TargetName}"
+                            );
                             updated++;
                         }
                         else
@@ -808,7 +810,9 @@ public sealed class App : IDnsApplication
                                 );
 
                                 updated++;
-                                Log($"PTR UPDATE: {wanted.TargetName} | {current.PtrName} -> {wanted.TargetName}");
+                                Log(
+                                    $"PTR UPDATE: {wanted.TargetName} | {current.PtrName} -> {wanted.TargetName}"
+                                );
                             }
                             catch (Exception ex)
                             {
@@ -938,7 +942,9 @@ public sealed class App : IDnsApplication
                     {
                         errors++;
 
-                        Log($"PTR DELETE ERROR: {existing.PtrName} | {existing.Name} | {ex.Message}");
+                        Log(
+                            $"PTR DELETE ERROR: {existing.PtrName} | {existing.Name} | {ex.Message}"
+                        );
                     }
                 }
             }
@@ -1081,9 +1087,7 @@ public sealed class App : IDnsApplication
                         ScheduleAppConfigSave();
                     }
                 }
-                else
-                {
-                }
+                else { }
             }
             catch (Exception ex)
             {
@@ -1298,7 +1302,6 @@ public sealed class App : IDnsApplication
         }
 
         EnsureTechnitiumApiOk(body, "Technitium PTR DELETE");
-
     }
 
     private static async Task<TechnitiumPtrRecord?> GetTechnitiumPtrRecordAsync(
@@ -1514,6 +1517,32 @@ public sealed class App : IDnsApplication
             .ToList();
     }
 
+    private static List<string> GetIpv6ForPtr(FritzBoxClient.FritzLanDevice device)
+    {
+        if (device.IpList is null)
+            return new List<string>();
+
+        return device
+            .IpList.Where(x =>
+                string.Equals(x.AddrType, "IPv6-GUA", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(x.AddrType, "IPv6-ULA", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(
+                    x.AddrType,
+                    "IPv6-GUA-Temporary",
+                    StringComparison.OrdinalIgnoreCase
+                )
+                || string.Equals(
+                    x.AddrType,
+                    "IPv6-ULA-Temporary",
+                    StringComparison.OrdinalIgnoreCase
+                )
+            )
+            .Select(x => NormalizeIpv6(x.Ip))
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
     private static string NormalizeIpv6(string ipAddress)
     {
         if (string.IsNullOrWhiteSpace(ipAddress))
@@ -1715,7 +1744,6 @@ public sealed class App : IDnsApplication
         }
 
         EnsureTechnitiumApiOk(body, "Technitium AAAA ADD");
-
     }
 
     private async Task DeleteTechnitiumAaaaAsync(
@@ -1757,7 +1785,6 @@ public sealed class App : IDnsApplication
         }
 
         EnsureTechnitiumApiOk(body, "Technitium AAAA DELETE");
-
     }
 
     private async Task UpdateTechnitiumAaaaAsync(
@@ -1826,7 +1853,6 @@ public sealed class App : IDnsApplication
                 throw new InvalidOperationException($"Technitium AAAA UPDATE Error: {message}");
             }
         }
-
     }
 
     private static string NormalizeDnsName(string name, string zone)
@@ -2176,252 +2202,236 @@ public sealed class App : IDnsApplication
         }
 
         EnsureTechnitiumApiOk(body, "Technitium reverse zone DELETE");
-
     }
 
     private async Task CleanupManagedIpv6ReverseZonesAsync(
-    HttpClient client,
-    Config cfg,
-    List<Ipv6PtrDesired> desired,
-    CancellationToken cancellationToken)
-{
-    if (cfg.ManagedIpv6ReverseZones.Count == 0)
+        HttpClient client,
+        Config cfg,
+        List<Ipv6PtrDesired> desired,
+        CancellationToken cancellationToken
+    )
     {
-        Log("PTR: no managed reverse zones registered.");
-        return;
-    }
+        if (cfg.ManagedIpv6ReverseZones.Count == 0)
+        {
+            Log("PTR: no managed reverse zones registered.");
+            return;
+        }
 
-    HashSet<string> desiredZones =
-        desired
+        HashSet<string> desiredZones = desired
             .Select(x => NormalizeReverseName(x.ReverseZone))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-    List<string> managedZones =
-        cfg.ManagedIpv6ReverseZones
-            .Select(NormalizeReverseName)
+        List<string> managedZones = cfg
+            .ManagedIpv6ReverseZones.Select(NormalizeReverseName)
             .Where(x => !string.IsNullOrWhiteSpace(x))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-    int deletedZones = 0;
-    int keptZones = 0;
-    int deletedPtrs = 0;
-    int ptrErrors = 0;
+        int deletedZones = 0;
+        int keptZones = 0;
+        int deletedPtrs = 0;
+        int ptrErrors = 0;
 
-    foreach (string reverseZone in managedZones)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-
-        /*
-         * ------------------------------------------------------------
-         * Zone wird aktuell noch benötigt.
-         * ------------------------------------------------------------
-         */
-        if (desiredZones.Contains(reverseZone))
-        {
-            continue;
-        }
-
-        Log("--------------------------------------------");
-        Log($"PTR: obsolete managed reverse zone: {reverseZone}");
-
-        /*
-         * ------------------------------------------------------------
-         * 1. Alle PTRs der alten Zone holen
-         * ------------------------------------------------------------
-         */
-        List<TechnitiumPtrRecord> zoneRecords;
-
-        try
-        {
-            zoneRecords =
-                await GetTechnitiumPtrRecordsAsync(
-                    client,
-                    cfg,
-                    reverseZone,
-                    cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            Log(
-                $"     -> Could not read PTR records: {ex.Message}");
-
-            keptZones++;
-            continue;
-        }
-
-        /*
-         * ------------------------------------------------------------
-         * 2. Ausschließlich von FritzBoxSync verwaltete PTRs löschen
-         * ------------------------------------------------------------
-         */
-        int managedPtrsInZone = 0;
-
-        foreach (TechnitiumPtrRecord existing in zoneRecords)
+        foreach (string reverseZone in managedZones)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (string.IsNullOrWhiteSpace(existing.Comments))
+            /*
+             * ------------------------------------------------------------
+             * Zone wird aktuell noch benötigt.
+             * ------------------------------------------------------------
+             */
+            if (desiredZones.Contains(reverseZone))
             {
                 continue;
             }
 
-            if (!existing.Comments.StartsWith(
-                    "FritzBoxSync - FRITZ!Box:",
-                    StringComparison.Ordinal))
-            {
-                /*
-                 * Fremder/manuell angelegter PTR.
-                 * NICHT löschen.
-                 */
-                continue;
-            }
+            Log("--------------------------------------------");
+            Log($"PTR: obsolete managed reverse zone: {reverseZone}");
 
-            managedPtrsInZone++;
-
-            Log("  -> obsolete managed PTR found:");
-            Log($"     owner   : {existing.Name}");
-            Log($"     target  : {existing.PtrName}");
-            Log($"     comment : {existing.Comments}");
-
-            if (cfg.DryRun)
-            {
-                Log("     -> TEST MODE: would be deleted.");
-                continue;
-            }
+            /*
+             * ------------------------------------------------------------
+             * 1. Alle PTRs der alten Zone holen
+             * ------------------------------------------------------------
+             */
+            List<TechnitiumPtrRecord> zoneRecords;
 
             try
             {
-                await DeleteTechnitiumPtrAsync(
+                zoneRecords = await GetTechnitiumPtrRecordsAsync(
                     client,
                     cfg,
                     reverseZone,
-                    existing,
-                    cancellationToken);
-
-                deletedPtrs++;
+                    cancellationToken
+                );
             }
             catch (Exception ex)
             {
-                ptrErrors++;
+                Log($"     -> Could not read PTR records: {ex.Message}");
 
-                Log(
-                    $"     -> PTR delete error: {ex.Message}");
+                keptZones++;
+                continue;
             }
-        }
 
-        /*
-         * ------------------------------------------------------------
-         * 3. TEST MODE
-         *
-         * Keine echten Änderungen durchführen.
-         * Die Zone bleibt deshalb bewusst bestehen.
-         * ------------------------------------------------------------
-         */
-        if (cfg.DryRun)
-        {
-            if (managedPtrsInZone > 0)
+            /*
+             * ------------------------------------------------------------
+             * 2. Ausschließlich von FritzBoxSync verwaltete PTRs löschen
+             * ------------------------------------------------------------
+             */
+            int managedPtrsInZone = 0;
+
+            foreach (TechnitiumPtrRecord existing in zoneRecords)
             {
-                Log(
-                    $"     -> TEST MODE: {managedPtrsInZone} " +
-                    "managed PTR(s) would be removed.");
+                cancellationToken.ThrowIfCancellationRequested();
 
-                Log(
-                    "     -> TEST MODE: reverse zone would then " +
-                    "be checked for deletion.");
+                if (string.IsNullOrWhiteSpace(existing.Comments))
+                {
+                    continue;
+                }
+
+                if (
+                    !existing.Comments.StartsWith(
+                        "FritzBoxSync - FRITZ!Box:",
+                        StringComparison.Ordinal
+                    )
+                )
+                {
+                    /*
+                     * Fremder/manuell angelegter PTR.
+                     * NICHT löschen.
+                     */
+                    continue;
+                }
+
+                managedPtrsInZone++;
+
+                Log("  -> obsolete managed PTR found:");
+                Log($"     owner   : {existing.Name}");
+                Log($"     target  : {existing.PtrName}");
+                Log($"     comment : {existing.Comments}");
+
+                if (cfg.DryRun)
+                {
+                    Log("     -> TEST MODE: would be deleted.");
+                    continue;
+                }
+
+                try
+                {
+                    await DeleteTechnitiumPtrAsync(
+                        client,
+                        cfg,
+                        reverseZone,
+                        existing,
+                        cancellationToken
+                    );
+
+                    deletedPtrs++;
+                }
+                catch (Exception ex)
+                {
+                    ptrErrors++;
+
+                    Log($"     -> PTR delete error: {ex.Message}");
+                }
             }
-            else
+
+            /*
+             * ------------------------------------------------------------
+             * 3. TEST MODE
+             *
+             * Keine echten Änderungen durchführen.
+             * Die Zone bleibt deshalb bewusst bestehen.
+             * ------------------------------------------------------------
+             */
+            if (cfg.DryRun)
             {
-                Log(
-                    "     -> TEST MODE: no managed PTRs found.");
+                if (managedPtrsInZone > 0)
+                {
+                    Log(
+                        $"     -> TEST MODE: {managedPtrsInZone} "
+                            + "managed PTR(s) would be removed."
+                    );
 
-                Log(
-                    "     -> TEST MODE: reverse zone would be " +
-                    "checked for deletion.");
+                    Log("     -> TEST MODE: reverse zone would then " + "be checked for deletion.");
+                }
+                else
+                {
+                    Log("     -> TEST MODE: no managed PTRs found.");
+
+                    Log("     -> TEST MODE: reverse zone would be " + "checked for deletion.");
+                }
+
+                keptZones++;
+                continue;
             }
 
-            keptZones++;
-            continue;
-        }
+            /*
+             * ------------------------------------------------------------
+             * 4. Nach dem Löschen prüfen:
+             *
+             * Sind jetzt nur noch SOA/NS vorhanden?
+             * ------------------------------------------------------------
+             */
+            bool empty;
 
-        /*
-         * ------------------------------------------------------------
-         * 4. Nach dem Löschen prüfen:
-         *
-         * Sind jetzt nur noch SOA/NS vorhanden?
-         * ------------------------------------------------------------
-         */
-        bool empty;
-
-        try
-        {
-            empty =
-                await IsTechnitiumReverseZoneEmptyAsync(
+            try
+            {
+                empty = await IsTechnitiumReverseZoneEmptyAsync(
                     client,
                     cfg,
                     reverseZone,
-                    cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            Log(
-                $"     -> Could not inspect zone after PTR cleanup: " +
-                ex.Message);
-
-            keptZones++;
-            continue;
-        }
-
-        if (!empty)
-        {
-            Log(
-                "     -> Zone still contains other records. " +
-                "It will NOT be deleted.");
-
-            keptZones++;
-            continue;
-        }
-
-        Log(
-            "     -> Zone is empty after managed PTR cleanup.");
-
-        /*
-         * ------------------------------------------------------------
-         * 5. Alte Reverse-Zone löschen
-         * ------------------------------------------------------------
-         */
-        try
-        {
-            await DeleteTechnitiumReverseZoneAsync(
-                client,
-                cfg,
-                reverseZone,
-                cancellationToken);
-
-            if (RemoveManagedIpv6ReverseZone(
-                    cfg,
-                    reverseZone))
+                    cancellationToken
+                );
+            }
+            catch (Exception ex)
             {
-                ScheduleAppConfigSave();
+                Log($"     -> Could not inspect zone after PTR cleanup: " + ex.Message);
+
+                keptZones++;
+                continue;
             }
 
-            deletedZones++;
-        }
-        catch (Exception ex)
-        {
-            Log(
-                $"     -> Reverse zone delete error: {ex.Message}");
+            if (!empty)
+            {
+                Log("     -> Zone still contains other records. " + "It will NOT be deleted.");
 
-            keptZones++;
+                keptZones++;
+                continue;
+            }
+
+            Log("     -> Zone is empty after managed PTR cleanup.");
+
+            /*
+             * ------------------------------------------------------------
+             * 5. Alte Reverse-Zone löschen
+             * ------------------------------------------------------------
+             */
+            try
+            {
+                await DeleteTechnitiumReverseZoneAsync(client, cfg, reverseZone, cancellationToken);
+
+                if (RemoveManagedIpv6ReverseZone(cfg, reverseZone))
+                {
+                    ScheduleAppConfigSave();
+                }
+
+                deletedZones++;
+            }
+            catch (Exception ex)
+            {
+                Log($"     -> Reverse zone delete error: {ex.Message}");
+
+                keptZones++;
+            }
         }
+
+        Log("--------------------------------------------");
+        Log($"PTR obsolete records deleted : {deletedPtrs}");
+        Log($"PTR delete errors             : {ptrErrors}");
+        Log($"PTR obsolete zones deleted    : {deletedZones}");
+        Log($"PTR obsolete zones kept       : {keptZones}");
     }
-
-    Log("--------------------------------------------");
-    Log($"PTR obsolete records deleted : {deletedPtrs}");
-    Log($"PTR delete errors             : {ptrErrors}");
-    Log($"PTR obsolete zones deleted    : {deletedZones}");
-    Log($"PTR obsolete zones kept       : {keptZones}");
-}
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
